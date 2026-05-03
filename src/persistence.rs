@@ -36,7 +36,7 @@ use std::path::Path;
 pub fn load_from(path: &Path) -> Registry {
     match std::fs::read_to_string(path) {
         Ok(s) => match serde_json::from_str::<Registry>(&s) {
-            Ok(reg) if reg.version == 1 => reg,
+            Ok(reg) if reg.version == REGISTRY_VERSION => reg,
             Ok(_) => {
                 eprintln!(
                     "cleader: registry has unknown version, starting fresh"
