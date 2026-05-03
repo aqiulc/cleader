@@ -1,1 +1,1 @@
-// Module declarations are added by subsequent tasks.
+pub mod error;
