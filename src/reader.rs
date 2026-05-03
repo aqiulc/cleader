@@ -159,9 +159,15 @@ pub fn build_status_bar(s: StatusInput<'_>) -> String {
     );
     let right = format!(" {STATUS_RIGHT} ");
 
-    // Reserve space for: prefix `── `, title, progress, right tail of fillers.
-    let title_budget =
-        width.saturating_sub(progress.len() + right.len() + 5); // 5 for `── ` and ` ──`
+    // Reserve space (in unicode columns, NOT bytes) for: leading `── ` (3),
+    // progress, right. Trailing dashes are filled by the pad loop. Using
+    // .len() here would over-truncate the title because progress contains
+    // multi-byte ─ glyphs (3 bytes / 1 column each).
+    let title_budget = width.saturating_sub(
+        UnicodeWidthStr::width(progress.as_str())
+            + UnicodeWidthStr::width(right.as_str())
+            + 3,
+    );
     let title = truncate_right(s.title, title_budget);
 
     let mut out = String::with_capacity(width);
@@ -421,7 +427,10 @@ mod tests {
             width: 50,
         });
         assert!(bar.contains("…"));
-        assert!(bar.starts_with("── An Ext") || bar.starts_with("── An "));
+        assert!(
+            bar.starts_with("── An Extremely"),
+            "title budget should now respect column counts, not byte lengths; got {bar:?}"
+        );
         assert_eq!(UnicodeWidthStr::width(bar.as_str()), 50);
     }
 
