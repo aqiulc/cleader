@@ -26,7 +26,9 @@ fn translate_key(key: KeyEvent) -> Option<Action> {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
     match (key.code, ctrl, shift) {
-        (Char('c'), true, _) => Some(Action::Quit),
+        // Ctrl+C quits (SIGINT analog). Ctrl+Q is XON in many terminals,
+        // so plain 'q' only — never accept Ctrl+Q as Quit.
+        (Char('c'), true, false) => Some(Action::Quit),
         (Char('q'), false, _) => Some(Action::Quit),
         (Esc, _, _) => Some(Action::Quit),
 
@@ -37,10 +39,10 @@ fn translate_key(key: KeyEvent) -> Option<Action> {
         (PageUp, _, _) | (Char('b'), false, false) => Some(Action::PagePrev),
 
         (Right, _, _) | (Char('l'), false, false) => Some(Action::PageNext),
-        (PageDown, _, _) | (Char(' '), false, _) => Some(Action::PageNext),
+        (PageDown, _, _) | (Char(' '), false, false) => Some(Action::PageNext),
 
         (Char('n'), false, false) => Some(Action::ChapterNext),
-        (Char('N'), false, true) => Some(Action::ChapterPrev),
+        (Char('N'), false, _) => Some(Action::ChapterPrev),
 
         _ => None,
     }
