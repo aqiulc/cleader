@@ -9,8 +9,6 @@ pub enum EpubError {
     Malformed { reason: String },
     #[error("this EPUB has no readable chapters")]
     NoChapters,
-    #[error("failed to read EPUB: {0}")]
-    Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, Error)]

@@ -1,6 +1,11 @@
 use cleader::epub::{Block, Book};
 use std::path::PathBuf;
 
+/// Returns the alphabetically-first `.epub` in `books/`.
+///
+/// Contract: every `.epub` dropped into `books/` must be loadable by
+/// `Book::open` (no deliberately-broken fixtures), or the happy-path tests
+/// below will appear to fail for unrelated reasons.
 fn first_test_book() -> PathBuf {
     let mut entries: Vec<_> = std::fs::read_dir("books")
         .expect("books/ folder should exist")

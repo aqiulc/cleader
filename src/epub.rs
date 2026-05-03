@@ -1,6 +1,9 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use scraper::{ElementRef, Html, Node};
+
+use crate::error::EpubError;
+use ::epub::doc::EpubDoc;
 
 /// Inline styling for a span of text.
 ///
@@ -262,10 +265,6 @@ fn collapse_whitespace(s: &str) -> String {
     out
 }
 
-use crate::error::EpubError;
-use ::epub::doc::EpubDoc;
-use std::path::Path;
-
 impl Book {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, EpubError> {
         let path = path.as_ref();
@@ -291,9 +290,12 @@ impl Book {
 
         let mut chapters = Vec::new();
         loop {
+            // Silent skip on get_current_str() == None: a single corrupt
+            // spine item shouldn't kill a 30-chapter book.
             if let Some((content, _mime)) = doc.get_current_str() {
                 let blocks = html_to_blocks(&content);
                 if !blocks.is_empty() {
+                    // TODO(v2): populate Chapter::title from <h1>/<title> or NCX TOC.
                     chapters.push(Chapter { title: None, blocks });
                 }
             }
