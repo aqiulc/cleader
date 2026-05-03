@@ -91,7 +91,9 @@ impl Persistence {
         Ok(Self { path, registry })
     }
 
-    /// Used by tests: point at an arbitrary path instead of the OS data dir.
+    /// Open against an explicit path. Intended for tests and internal tooling
+    /// only — production code should use `open()`.
+    #[doc(hidden)]
     pub fn open_at(path: PathBuf) -> Self {
         let registry = load_from(&path);
         Self { path, registry }
@@ -105,7 +107,7 @@ impl Persistence {
         self.registry.books.insert(key, pos);
     }
 
-    pub fn flush(&self) -> Result<(), PersistenceError> {
+    pub fn flush(&mut self) -> Result<(), PersistenceError> {
         save_to(&self.path, &self.registry)
     }
 }
@@ -270,5 +272,22 @@ mod tests {
         let pos = p.get("/book.epub").expect("position should persist");
         assert_eq!(pos.chapter_idx, 3);
         assert_eq!(pos.line_offset, 99);
+    }
+
+    #[test]
+    fn persistence_upsert_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let mut p = Persistence::open_at(path);
+        let make = |ch| Position {
+            title: "T".into(),
+            author: "A".into(),
+            chapter_idx: ch,
+            line_offset: 0,
+            last_read: Utc::now(),
+        };
+        p.upsert("/k".into(), make(1));
+        p.upsert("/k".into(), make(2));
+        assert_eq!(p.get("/k").unwrap().chapter_idx, 2);
     }
 }
