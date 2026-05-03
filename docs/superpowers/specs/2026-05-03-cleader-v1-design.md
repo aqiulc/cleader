@@ -336,7 +336,7 @@ No automated end-to-end terminal driving in v1. Manual smoke checklist (lives in
 - `Cargo.toml` with the dependencies listed
 - `README.md`: project description, screenshots/asciinema, install instructions (`cargo install --path .` to start; package managers later), usage, key bindings, license
 - `BACKLOG.md`: the nine items below
-- `LICENSE`: choose at implementation time (likely MIT or Apache-2.0; user choice)
+- `LICENSE-MIT` and `LICENSE-APACHE`: dual-licensed `MIT OR Apache-2.0` (Rust ecosystem norm; also what `cargo new` and crates.io expect). `Cargo.toml` will declare `license = "MIT OR Apache-2.0"`.
 - `CONTRIBUTING.md`: manual smoke checklist, dev setup
 - `.gitignore`: `target/`, `books/`, `registry.json` if local
 
