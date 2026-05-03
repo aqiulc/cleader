@@ -1,6 +1,9 @@
 use crate::epub::{Block, Span, SpanStyle};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span as TuiSpan};
+use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 const HEADING_COLOR: Color = Color::Cyan;
@@ -208,10 +211,6 @@ fn truncate_right(s: &str, budget: usize) -> String {
     acc
 }
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::widgets::{Paragraph, Wrap};
-use ratatui::Frame;
-
 pub struct RenderInput<'a> {
     pub wrapped: &'a [Line<'static>],
     pub line_offset: usize,
@@ -245,8 +244,13 @@ pub fn render(frame: &mut Frame, area: Rect, input: RenderInput<'_>) {
     let visible = &input.wrapped[input.line_offset.min(input.wrapped.len())..end];
     let owned: Vec<Line<'static>> = visible.to_vec();
 
-    let body = Paragraph::new(owned)
-        .wrap(Wrap { trim: false });
+    // No .wrap() — we already wrap the chapter via wrap_chapter, so the
+    // lines are at the right width by construction. Letting ratatui's
+    // wrap re-flow on overflow would split styled spans mid-style
+    // (ratatui doesn't know about our semantic boundaries). Over-wide
+    // lines clip at the right edge, matching wrap_chapter's documented
+    // long-word policy.
+    let body = Paragraph::new(owned);
     // Add left padding by inset.
     let padded = Rect {
         x: body_rect.x + BODY_LEFT_PAD,
@@ -263,6 +267,11 @@ pub fn render(frame: &mut Frame, area: Rect, input: RenderInput<'_>) {
 }
 
 /// Width in columns the wrap step should target, given the terminal width.
+///
+/// Floored at 20 because narrower wrap targets produce one-word-per-line
+/// output that's worse than letting the renderer clip a wider wrap. On
+/// terminals narrower than ~24 cols the rendered output will be clipped;
+/// that's expected — cleader is not designed for sub-terminal widths.
 pub fn body_text_width(terminal_width: u16) -> u16 {
     terminal_width
         .min(MAX_BODY_WIDTH)
