@@ -262,6 +262,59 @@ fn collapse_whitespace(s: &str) -> String {
     out
 }
 
+use crate::error::EpubError;
+use ::epub::doc::EpubDoc;
+use std::path::Path;
+
+impl Book {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, EpubError> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Err(EpubError::NotFound(path.to_path_buf()));
+        }
+
+        let mut doc = EpubDoc::new(path)
+            .map_err(|e| EpubError::Malformed { reason: e.to_string() })?;
+
+        let title = doc
+            .mdata("title")
+            .map(|m| m.value.clone())
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Untitled".into())
+            });
+        let author = doc
+            .mdata("creator")
+            .map(|m| m.value.clone())
+            .unwrap_or_else(|| "Unknown".into());
+
+        let mut chapters = Vec::new();
+        loop {
+            if let Some((content, _mime)) = doc.get_current_str() {
+                let blocks = html_to_blocks(&content);
+                if !blocks.is_empty() {
+                    chapters.push(Chapter { title: None, blocks });
+                }
+            }
+            if !doc.go_next() {
+                break;
+            }
+        }
+
+        if chapters.is_empty() {
+            return Err(EpubError::NoChapters);
+        }
+
+        Ok(Book {
+            title,
+            author,
+            path: path.to_path_buf(),
+            chapters,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
