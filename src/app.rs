@@ -318,18 +318,37 @@ mod tests {
 
     #[test]
     fn line_up_at_chapter_start_goes_to_previous_chapter_last_line() {
+        // First chapter must wrap to multiple lines, otherwise the
+        // "last line" and "first line" indices coincide and the test
+        // would pass whether or not the usize::MAX clamping actually
+        // works.
+        let long = "alpha bravo charlie delta echo foxtrot golf hotel \
+            india juliet kilo lima mike november oscar papa quebec \
+            romeo sierra tango uniform victor whiskey xray yankee zulu";
         let (p_handle, _dir) = fresh_persistence();
-        let book = book_with_chapters(vec![vec![p("ch1")], vec![p("ch2")]]);
-        let mut app = App::new(book, p_handle, (80, 24));
-        // Move to chapter 1.
-        while app.chapter_idx() == 0 {
-            app.handle(Action::LineDown);
-        }
-        assert_eq!(app.chapter_idx(), 1);
-        assert_eq!(app.line_offset(), 0);
-        app.handle(Action::LineUp);
-        assert_eq!(app.chapter_idx(), 0);
-        // Should be at the last wrapped line of chapter 0.
+        let book = book_with_chapters(vec![vec![p(long)], vec![p("ch2")]]);
+        let mut app = App::new(book, p_handle, (40, 24));
+        // The long first chapter must produce multiple wrapped lines
+        // at width 40 (after 3-col left pad → 37 cols of body); 26
+        // greek-alphabet words at ~6 cols each won't fit in one line.
+        let chapter_zero_last_line = {
+            // Move to chapter 1 by repeated LineDown.
+            while app.chapter_idx() == 0 {
+                app.handle(Action::LineDown);
+            }
+            assert_eq!(app.chapter_idx(), 1);
+            assert_eq!(app.line_offset(), 0);
+            // Now go back to chapter 0; we should land on its last line.
+            app.handle(Action::LineUp);
+            assert_eq!(app.chapter_idx(), 0);
+            app.line_offset()
+        };
+        assert_eq!(
+            chapter_zero_last_line,
+            app.wrapped().len() - 1,
+            "LineUp at chapter start should land on chapter 0's last line"
+        );
+        assert!(app.wrapped().len() > 1, "test fixture must wrap to multiple lines");
     }
 
     #[test]
