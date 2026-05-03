@@ -133,6 +133,75 @@ fn is_word_break(ch: char) -> bool {
     ch.is_whitespace() && ch != '\u{00A0}' && ch != '\u{202F}'
 }
 
+const STATUS_RIGHT: &str = "q quit";
+
+pub struct StatusInput<'a> {
+    pub title: &'a str,
+    pub chapter_idx: usize,
+    pub chapter_count: usize,
+    pub page: usize,
+    pub total_pages: usize,
+    pub width: u16,
+}
+
+pub fn build_status_bar(s: StatusInput<'_>) -> String {
+    let width = s.width as usize;
+    if width < 4 {
+        return "".into();
+    }
+
+    let progress = format!(
+        " ── Ch {}/{} ─ Page {}/{} ─ ",
+        s.chapter_idx + 1,
+        s.chapter_count,
+        s.page,
+        s.total_pages
+    );
+    let right = format!(" {STATUS_RIGHT} ");
+
+    // Reserve space for: prefix `── `, title, progress, right tail of fillers.
+    let title_budget =
+        width.saturating_sub(progress.len() + right.len() + 5); // 5 for `── ` and ` ──`
+    let title = truncate_right(s.title, title_budget);
+
+    let mut out = String::with_capacity(width);
+    out.push_str("── ");
+    out.push_str(&title);
+    out.push_str(&progress);
+    out.push_str(&right);
+    // Pad the rest with the same dash glyph used at the start.
+    while UnicodeWidthStr::width(out.as_str()) < width {
+        out.push('─');
+    }
+    // Hard truncate if our math overshot due to wide chars.
+    while UnicodeWidthStr::width(out.as_str()) > width {
+        out.pop();
+    }
+    out
+}
+
+fn truncate_right(s: &str, budget: usize) -> String {
+    if budget == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(s) <= budget {
+        return s.to_string();
+    }
+    // Reserve 1 column for the ellipsis.
+    let mut acc = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthStr::width(ch.to_string().as_str());
+        if w + cw + 1 > budget {
+            break;
+        }
+        acc.push(ch);
+        w += cw;
+    }
+    acc.push('…');
+    acc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +391,51 @@ mod tests {
             bold_lines >= 2,
             "bold modifier must survive across wrap; bold appeared on {bold_lines} line(s)"
         );
+    }
+
+    #[test]
+    fn status_bar_fits_exact_terminal_width() {
+        let bar = build_status_bar(StatusInput {
+            title: "Firefly",
+            chapter_idx: 3,
+            chapter_count: 22,
+            page: 18,
+            total_pages: 247,
+            width: 80,
+        });
+        assert_eq!(UnicodeWidthStr::width(bar.as_str()), 80);
+        assert!(bar.contains("Firefly"));
+        assert!(bar.contains("Ch 4/22"));
+        assert!(bar.contains("Page 18/247"));
+        assert!(bar.contains("q quit"));
+    }
+
+    #[test]
+    fn status_bar_truncates_long_title_with_ellipsis_on_right() {
+        let bar = build_status_bar(StatusInput {
+            title: "An Extremely Long Book Title That Will Not Fit",
+            chapter_idx: 0,
+            chapter_count: 1,
+            page: 1,
+            total_pages: 1,
+            width: 50,
+        });
+        assert!(bar.contains("…"));
+        assert!(bar.starts_with("── An Ext") || bar.starts_with("── An "));
+        assert_eq!(UnicodeWidthStr::width(bar.as_str()), 50);
+    }
+
+    #[test]
+    fn status_bar_with_tiny_width_does_not_panic() {
+        let bar = build_status_bar(StatusInput {
+            title: "X",
+            chapter_idx: 0,
+            chapter_count: 1,
+            page: 1,
+            total_pages: 1,
+            width: 3,
+        });
+        // Just must not panic.
+        let _ = bar;
     }
 }
