@@ -1,3 +1,4 @@
+pub mod app;
 pub mod epub;
 pub mod error;
 pub mod input;
