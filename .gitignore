@@ -1,0 +1,4 @@
+target/
+books/
+registry.json
+.DS_Store
