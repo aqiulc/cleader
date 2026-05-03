@@ -31,9 +31,39 @@ impl Default for Registry {
     }
 }
 
+use std::path::Path;
+
+pub fn load_from(path: &Path) -> Registry {
+    match std::fs::read_to_string(path) {
+        Ok(s) => match serde_json::from_str::<Registry>(&s) {
+            Ok(reg) if reg.version == 1 => reg,
+            Ok(_) => {
+                eprintln!(
+                    "cleader: registry has unknown version, starting fresh"
+                );
+                Registry::default()
+            }
+            Err(e) => {
+                eprintln!(
+                    "cleader: registry is corrupt ({e}), starting fresh"
+                );
+                Registry::default()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Registry::default()
+        }
+        Err(e) => {
+            eprintln!("cleader: could not read registry ({e}), starting fresh");
+            Registry::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn registry_roundtrips_through_json() {
@@ -77,5 +107,42 @@ mod tests {
         let reg: Registry =
             serde_json::from_str(r#"{"books": {}}"#).unwrap();
         assert_eq!(reg.version, 1);
+    }
+
+    #[test]
+    fn load_from_missing_file_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nope.json");
+        let reg = load_from(&path);
+        assert_eq!(reg, Registry::default());
+    }
+
+    #[test]
+    fn load_from_corrupt_json_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.json");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"this is not json").unwrap();
+        let reg = load_from(&path);
+        assert_eq!(reg, Registry::default());
+    }
+
+    #[test]
+    fn load_from_unknown_version_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.json");
+        std::fs::write(&path, r#"{"version":999,"books":{}}"#).unwrap();
+        let reg = load_from(&path);
+        assert_eq!(reg, Registry::default());
+    }
+
+    #[test]
+    fn load_from_valid_file_returns_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.json");
+        std::fs::write(&path, r#"{"version":1,"books":{}}"#).unwrap();
+        let reg = load_from(&path);
+        assert_eq!(reg.version, 1);
+        assert!(reg.books.is_empty());
     }
 }
