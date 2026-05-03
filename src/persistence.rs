@@ -2,17 +2,24 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+const REGISTRY_VERSION: u32 = 1;
+
+fn default_version() -> u32 {
+    REGISTRY_VERSION
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Position {
     pub title: String,
     pub author: String,
-    pub chapter_idx: usize,
-    pub line_offset: usize,
+    pub chapter_idx: u32,
+    pub line_offset: u32,
     pub last_read: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Registry {
+    #[serde(default = "default_version")]
     pub version: u32,
     #[serde(default)]
     pub books: BTreeMap<String, Position>,
@@ -20,7 +27,7 @@ pub struct Registry {
 
 impl Default for Registry {
     fn default() -> Self {
-        Self { version: 1, books: BTreeMap::new() }
+        Self { version: REGISTRY_VERSION, books: BTreeMap::new() }
     }
 }
 
@@ -53,5 +60,22 @@ mod tests {
         let reg = Registry::default();
         assert_eq!(reg.version, 1);
         assert!(reg.books.is_empty());
+    }
+
+    #[test]
+    fn registry_parses_with_missing_optional_fields() {
+        // Empty object — both fields use serde defaults
+        let reg: Registry = serde_json::from_str("{}").unwrap();
+        assert_eq!(reg.version, 1);
+        assert!(reg.books.is_empty());
+
+        // Only version
+        let reg: Registry = serde_json::from_str(r#"{"version": 1}"#).unwrap();
+        assert!(reg.books.is_empty());
+
+        // Only books
+        let reg: Registry =
+            serde_json::from_str(r#"{"books": {}}"#).unwrap();
+        assert_eq!(reg.version, 1);
     }
 }
