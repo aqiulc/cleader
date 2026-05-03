@@ -1,9 +1,10 @@
 use crate::error::PersistenceError;
 use chrono::{DateTime, Utc};
+use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const REGISTRY_VERSION: u32 = 1;
 
@@ -75,6 +76,44 @@ pub fn save_to(path: &Path, registry: &Registry) -> Result<(), PersistenceError>
     }
     std::fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+pub struct Persistence {
+    path: PathBuf,
+    registry: Registry,
+}
+
+impl Persistence {
+    /// Resolve the platform-correct registry path and load existing state.
+    pub fn open() -> Result<Self, PersistenceError> {
+        let path = default_registry_path()?;
+        let registry = load_from(&path);
+        Ok(Self { path, registry })
+    }
+
+    /// Used by tests: point at an arbitrary path instead of the OS data dir.
+    pub fn open_at(path: PathBuf) -> Self {
+        let registry = load_from(&path);
+        Self { path, registry }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Position> {
+        self.registry.books.get(key)
+    }
+
+    pub fn upsert(&mut self, key: String, pos: Position) {
+        self.registry.books.insert(key, pos);
+    }
+
+    pub fn flush(&self) -> Result<(), PersistenceError> {
+        save_to(&self.path, &self.registry)
+    }
+}
+
+fn default_registry_path() -> Result<PathBuf, PersistenceError> {
+    let dirs = ProjectDirs::from("", "", "cleader")
+        .ok_or(PersistenceError::NoDataDir)?;
+    Ok(dirs.data_dir().join("registry.json"))
 }
 
 #[cfg(test)]
@@ -199,5 +238,37 @@ mod tests {
         let path = dir.path().join("registry.json");
         save_to(&path, &Registry::default()).unwrap();
         assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn persistence_open_at_returns_empty_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let p = Persistence::open_at(path);
+        assert!(p.get("/anything").is_none());
+    }
+
+    #[test]
+    fn persistence_upsert_then_flush_then_reopen_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        {
+            let mut p = Persistence::open_at(path.clone());
+            p.upsert(
+                "/book.epub".into(),
+                Position {
+                    title: "T".into(),
+                    author: "A".into(),
+                    chapter_idx: 3,
+                    line_offset: 99,
+                    last_read: Utc::now(),
+                },
+            );
+            p.flush().unwrap();
+        }
+        let p = Persistence::open_at(path);
+        let pos = p.get("/book.epub").expect("position should persist");
+        assert_eq!(pos.chapter_idx, 3);
+        assert_eq!(pos.line_offset, 99);
     }
 }
