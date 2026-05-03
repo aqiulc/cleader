@@ -77,7 +77,14 @@ fn walk_block_level(el: &ElementRef, out: &mut Vec<Block>) {
                         out.push(Block::Paragraph { spans });
                     }
                 }
-                // Other tags handled in later tasks; for now descend.
+                "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                    let level = tag.as_bytes()[1] - b'0';
+                    let spans = collect_spans(&child_el, SpanStyle::Plain);
+                    if !spans.is_empty() {
+                        out.push(Block::Heading { level, spans });
+                        out.push(Block::Blank);
+                    }
+                }
                 _ => walk_block_level(&child_el, out),
             }
         }
@@ -204,5 +211,31 @@ mod tests {
         assert!(matches!(blocks[0], Block::Paragraph { .. }));
         assert!(matches!(blocks[1], Block::Blank));
         assert!(matches!(blocks[2], Block::Paragraph { .. }));
+    }
+
+    #[test]
+    fn h1_extracts_heading_block_with_blank_after() {
+        let blocks = html_to_blocks("<html><body><h1>Chapter One</h1></body></html>");
+        assert_eq!(blocks.len(), 2);
+        match &blocks[0] {
+            Block::Heading { level, spans } => {
+                assert_eq!(*level, 1);
+                assert_eq!(spans[0].text, "Chapter One");
+            }
+            _ => panic!("expected heading"),
+        }
+        assert!(matches!(blocks[1], Block::Blank));
+    }
+
+    #[test]
+    fn all_heading_levels_are_recognised() {
+        for n in 1..=6u8 {
+            let html = format!("<html><body><h{n}>x</h{n}></body></html>");
+            let blocks = html_to_blocks(&html);
+            match &blocks[0] {
+                Block::Heading { level, .. } => assert_eq!(*level, n),
+                _ => panic!("expected heading at level {n}"),
+            }
+        }
     }
 }
