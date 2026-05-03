@@ -9,24 +9,23 @@ pub enum EpubError {
     Malformed { reason: String },
     #[error("this EPUB has no readable chapters")]
     NoChapters,
-    #[error("EPUB I/O error: {0}")]
+    #[error("failed to read EPUB: {0}")]
     Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, Error)]
 pub enum PersistenceError {
-    #[error("could not resolve data directory")]
+    #[error("data directory not found")]
     NoDataDir,
-    #[error("persistence I/O error: {0}")]
+    #[error("failed to read state file: {0}")]
     Io(#[from] std::io::Error),
-    #[error("persistence serialization error: {0}")]
+    #[error("failed to parse state file: {0}")]
     Serde(#[from] serde_json::Error),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn epub_error_displays_path() {
@@ -43,6 +42,12 @@ mod tests {
     #[test]
     fn persistence_error_no_data_dir_message() {
         let err = PersistenceError::NoDataDir;
-        assert_eq!(err.to_string(), "could not resolve data directory");
+        assert_eq!(err.to_string(), "data directory not found");
+    }
+
+    #[test]
+    fn epub_error_no_chapters_message() {
+        let err = EpubError::NoChapters;
+        assert_eq!(err.to_string(), "this EPUB has no readable chapters");
     }
 }
