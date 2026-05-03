@@ -11,7 +11,6 @@ pub struct App {
     line_offset: usize,
     wrapped: Vec<Line<'static>>,
     viewport_size: (u16, u16),
-    #[allow(dead_code)] // used by handle() in Task 19/20
     persistence: Persistence,
     should_quit: bool,
 }
@@ -81,7 +80,6 @@ impl App {
         self.wrapped.len().div_ceil(self.lines_per_page()).max(1)
     }
 
-    #[allow(dead_code)] // used by handle() in Task 19/20
     fn load_chapter(&mut self, idx: usize, line_offset: usize) {
         self.chapter_idx = idx;
         self.wrapped = wrap_chapter(
@@ -91,7 +89,6 @@ impl App {
         self.line_offset = line_offset.min(self.wrapped.len().saturating_sub(1));
     }
 
-    #[allow(dead_code)] // used by handle() in Task 19/20
     fn current_position(&self) -> Position {
         Position {
             title: self.book.title.clone(),
@@ -102,7 +99,6 @@ impl App {
         }
     }
 
-    #[allow(dead_code)] // used by handle() in Task 19/20
     fn save(&mut self) {
         let key = self.book.path.to_string_lossy().into_owned();
         let pos = self.current_position();
@@ -113,8 +109,40 @@ impl App {
     }
 
     pub fn handle(&mut self, action: Action) {
-        // Implemented in following tasks.
-        let _ = action;
+        match action {
+            Action::LineDown => self.line_down(),
+            Action::LineUp => self.line_up(),
+            Action::Quit => {
+                self.save();
+                self.should_quit = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn line_down(&mut self) {
+        if self.line_offset + 1 < self.wrapped.len() {
+            self.line_offset += 1;
+            return;
+        }
+        // At end of current chapter; advance if possible.
+        if self.chapter_idx + 1 < self.book.chapters.len() {
+            self.load_chapter(self.chapter_idx + 1, 0);
+        }
+        // Otherwise: no-op (last line of last chapter).
+    }
+
+    fn line_up(&mut self) {
+        if self.line_offset > 0 {
+            self.line_offset -= 1;
+            return;
+        }
+        // At start of chapter; go back if possible.
+        if self.chapter_idx > 0 {
+            let prev = self.chapter_idx - 1;
+            // We'll set offset to last line after re-wrap.
+            self.load_chapter(prev, usize::MAX);
+        }
     }
 }
 
@@ -245,5 +273,72 @@ mod tests {
         let app = App::new(book, p_handle, (80, 24));
         assert_eq!(app.page(), 1);
         assert_eq!(app.total_pages(), 1);
+    }
+
+    #[test]
+    fn line_down_increments_within_chapter() {
+        let (p_handle, _dir) = fresh_persistence();
+        // Create a chapter with enough content to span 3+ wrapped lines.
+        let blocks = vec![p("aaa bbb ccc"), p("ddd eee fff"), p("ggg hhh iii")];
+        let book = book_with_chapters(vec![blocks]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        let start = app.line_offset();
+        app.handle(Action::LineDown);
+        assert_eq!(app.line_offset(), start + 1);
+    }
+
+    #[test]
+    fn line_down_at_chapter_end_advances_to_next_chapter() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("ch1")], vec![p("ch2")]]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        // Walk to the last line of chapter 0.
+        while app.line_offset() + 1 < app.wrapped().len() {
+            app.handle(Action::LineDown);
+        }
+        let chap_count_before = app.chapter_idx();
+        assert_eq!(chap_count_before, 0);
+        app.handle(Action::LineDown);
+        assert_eq!(app.chapter_idx(), 1);
+        assert_eq!(app.line_offset(), 0);
+    }
+
+    #[test]
+    fn line_down_at_last_line_of_last_chapter_is_noop() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("only")]]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        while app.line_offset() + 1 < app.wrapped().len() {
+            app.handle(Action::LineDown);
+        }
+        let before = (app.chapter_idx(), app.line_offset());
+        app.handle(Action::LineDown);
+        assert_eq!((app.chapter_idx(), app.line_offset()), before);
+    }
+
+    #[test]
+    fn line_up_at_chapter_start_goes_to_previous_chapter_last_line() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("ch1")], vec![p("ch2")]]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        // Move to chapter 1.
+        while app.chapter_idx() == 0 {
+            app.handle(Action::LineDown);
+        }
+        assert_eq!(app.chapter_idx(), 1);
+        assert_eq!(app.line_offset(), 0);
+        app.handle(Action::LineUp);
+        assert_eq!(app.chapter_idx(), 0);
+        // Should be at the last wrapped line of chapter 0.
+    }
+
+    #[test]
+    fn quit_sets_should_quit_flag() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("x")]]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        assert!(!app.should_quit());
+        app.handle(Action::Quit);
+        assert!(app.should_quit());
     }
 }
