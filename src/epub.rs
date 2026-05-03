@@ -70,7 +70,8 @@ fn walk_block_level(el: &ElementRef, out: &mut Vec<Block>) {
             let tag = e.name();
             match tag {
                 "p" => {
-                    let spans = collect_spans(&child_el, SpanStyle::Plain);
+                    let mut spans = collect_spans(&child_el, SpanStyle::Plain);
+                    trim_span_edges(&mut spans);
                     if spans.is_empty() {
                         out.push(Block::Blank);
                     } else {
@@ -80,7 +81,8 @@ fn walk_block_level(el: &ElementRef, out: &mut Vec<Block>) {
                 "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                     // Match arm guarantees tag is "h1".."h6", all 2-byte ASCII; byte 1 is the digit.
                     let level = tag.as_bytes()[1] - b'0';
-                    let spans = collect_spans(&child_el, SpanStyle::Plain);
+                    let mut spans = collect_spans(&child_el, SpanStyle::Plain);
+                    trim_span_edges(&mut spans);
                     // Empty heading: drop (no spacer convention for headings, unlike <p>).
                     if !spans.is_empty() {
                         out.push(Block::Heading { level, spans });
@@ -89,6 +91,29 @@ fn walk_block_level(el: &ElementRef, out: &mut Vec<Block>) {
                 }
                 _ => walk_block_level(&child_el, out),
             }
+        }
+    }
+}
+
+/// Trim leading whitespace from the first span and trailing whitespace from
+/// the last span. Inter-span whitespace is preserved.
+fn trim_span_edges(spans: &mut Vec<Span>) {
+    if let Some(first) = spans.first_mut() {
+        let trimmed = first.text.trim_start();
+        if trimmed.len() != first.text.len() {
+            first.text = trimmed.to_string();
+        }
+        if first.text.is_empty() {
+            spans.remove(0);
+        }
+    }
+    if let Some(last) = spans.last_mut() {
+        let trimmed = last.text.trim_end();
+        if trimmed.len() != last.text.len() {
+            last.text = trimmed.to_string();
+        }
+        if last.text.is_empty() {
+            spans.pop();
         }
     }
 }
@@ -103,10 +128,15 @@ fn collect_spans(el: &ElementRef, current_style: SpanStyle) -> Vec<Span> {
                     spans.push(Span { text, style: current_style });
                 }
             }
-            Node::Element(_) => {
-                if let Some(child_el) = ElementRef::wrap(child) {
-                    spans.extend(collect_spans(&child_el, current_style));
-                }
+            Node::Element(e) => {
+                let Some(child_el) = ElementRef::wrap(child) else { continue };
+                let tag = e.name();
+                let next_style = match tag {
+                    "b" | "strong" => SpanStyle::Bold,
+                    "i" | "em" => SpanStyle::Italic,
+                    _ => current_style,
+                };
+                spans.extend(collect_spans(&child_el, next_style));
             }
             _ => {}
         }
@@ -128,7 +158,7 @@ fn collapse_whitespace(s: &str) -> String {
             prev_space = false;
         }
     }
-    out.trim().to_string()
+    out
 }
 
 #[cfg(test)]
@@ -252,33 +282,64 @@ mod tests {
     }
 
     #[test]
-    fn heading_with_inline_em_is_currently_flat_plain() {
-        // Pre-Task-11 / Pre-Task-14 behavior pin. Two things will change in
-        // future tasks; this test fails deliberately when either lands:
-        //   (1) <em> inside a heading is currently rendered as a plain span;
-        //       Task 11 will switch to SpanStyle::Italic.
-        //   (2) Adjacent text nodes lose their separating space because
-        //       collapse_whitespace trims each text node individually
-        //       ("Part " + "One" -> "Part" + "One" -> "PartOne"). This is a
-        //       known cross-span-space-loss bug to be fixed alongside Task 11
-        //       (when collect_spans is restructured) or in Task 14's wrap
-        //       layer if it survives that long.
+    fn heading_with_inline_em_renders_italic_span() {
+        // Task 10 pinned the pre-Task-11 flat-plain behavior. Task 11 now
+        // maps <em> to italic, so the heading has a mix of Plain and Italic
+        // spans. The cross-span-space-loss bug (see comment in this test
+        // before Task 11) is also addressed here as part of restructuring
+        // collect_spans — text nodes no longer trim individually.
         let blocks = html_to_blocks(
             "<html><body><h1>Part <em>One</em></h1></body></html>",
         );
         match &blocks[0] {
             Block::Heading { spans, .. } => {
-                assert!(
-                    spans.iter().all(|s| s.style == SpanStyle::Plain),
-                    "pre-Task-11: <em> not yet styled"
-                );
                 let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
-                assert_eq!(
-                    joined, "PartOne",
-                    "pre-fix: cross-span space is lost; Task 11 or Task 14 should fix"
-                );
+                assert_eq!(joined, "Part One", "inter-span space must survive");
+                let italic_spans: Vec<_> = spans.iter().filter(|s| s.style == SpanStyle::Italic).collect();
+                assert_eq!(italic_spans.len(), 1, "exactly one italic span (the <em>)");
+                assert_eq!(italic_spans[0].text, "One");
             }
             _ => panic!("expected heading"),
+        }
+    }
+
+    #[test]
+    fn bold_tag_produces_bold_span() {
+        let blocks = html_to_blocks(
+            "<html><body><p>plain <b>bold</b> plain</p></body></html>",
+        );
+        match &blocks[0] {
+            Block::Paragraph { spans } => {
+                assert_eq!(spans.len(), 3);
+                assert_eq!(spans[0].style, SpanStyle::Plain);
+                assert_eq!(spans[1].style, SpanStyle::Bold);
+                assert_eq!(spans[1].text, "bold");
+                assert_eq!(spans[2].style, SpanStyle::Plain);
+            }
+            _ => panic!("expected paragraph"),
+        }
+    }
+
+    #[test]
+    fn strong_tag_is_treated_as_bold() {
+        let blocks = html_to_blocks(
+            "<html><body><p><strong>x</strong></p></body></html>",
+        );
+        match &blocks[0] {
+            Block::Paragraph { spans } => assert_eq!(spans[0].style, SpanStyle::Bold),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn em_and_i_tags_produce_italic() {
+        for tag in ["em", "i"] {
+            let html = format!("<html><body><p><{tag}>x</{tag}></p></body></html>");
+            let blocks = html_to_blocks(&html);
+            match &blocks[0] {
+                Block::Paragraph { spans } => assert_eq!(spans[0].style, SpanStyle::Italic),
+                _ => panic!(),
+            }
         }
     }
 }
