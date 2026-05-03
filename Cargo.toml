@@ -1,0 +1,33 @@
+[package]
+name = "cleader"
+version = "0.1.0"
+edition = "2024"
+authors = ["Aqiul <aqiul.c@gmail.com>"]
+description = "A high-performance, distraction-free CLI ebook reader"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/aqiulc/cleader"
+readme = "README.md"
+keywords = ["epub", "reader", "tui", "cli", "terminal"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+ratatui = "0.28"
+crossterm = "0.28"
+epub = "2.1"
+scraper = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "5"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "1"
+unicode-width = "0.2"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
