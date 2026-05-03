@@ -67,6 +67,7 @@ pub fn save_to(path: &Path, registry: &Registry) -> Result<(), PersistenceError>
     }
     let tmp_path = path.with_extension("json.tmp");
     {
+        // Scope: drop the file handle before rename (required on Windows).
         let mut tmp = std::fs::File::create(&tmp_path)?;
         let bytes = serde_json::to_vec_pretty(registry)?;
         tmp.write_all(&bytes)?;
