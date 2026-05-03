@@ -89,6 +89,36 @@ fn walk_block_level(el: &ElementRef, out: &mut Vec<Block>) {
                         out.push(Block::Blank);
                     }
                 }
+                "blockquote" => {
+                    // Italic + 4-space indent; nested children flattened to one paragraph.
+                    let mut inner = collect_spans(&child_el, SpanStyle::Italic);
+                    trim_span_edges(&mut inner);
+                    if !inner.is_empty() {
+                        let mut spans = vec![Span::plain("    ")];
+                        spans.extend(inner);
+                        out.push(Block::Paragraph { spans });
+                    }
+                }
+                "ul" => emit_list(&child_el, out, ListKind::Unordered),
+                "ol" => emit_list(&child_el, out, ListKind::Ordered),
+                "hr" => {
+                    out.push(Block::Paragraph {
+                        spans: vec![Span::plain("─ ─ ─")],
+                    });
+                }
+                "img" => {
+                    let alt = child_el.value().attr("alt").unwrap_or("").trim();
+                    if !alt.is_empty() {
+                        out.push(Block::Paragraph {
+                            spans: vec![Span::plain(format!("[image: {alt}]"))],
+                        });
+                    }
+                }
+                "table" => emit_table(&child_el, out),
+                "br" => {
+                    // Stand-alone <br> outside a paragraph: emit a blank.
+                    out.push(Block::Blank);
+                }
                 _ => walk_block_level(&child_el, out),
             }
         }
@@ -122,6 +152,59 @@ fn trim_span_edges(spans: &mut Vec<Span>) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ListKind {
+    Unordered,
+    Ordered,
+}
+
+fn emit_list(el: &ElementRef, out: &mut Vec<Block>, kind: ListKind) {
+    let mut idx = 1usize;
+    for li in el.children() {
+        let Node::Element(e) = li.value() else { continue };
+        if e.name() != "li" { continue; }
+        let Some(li_el) = ElementRef::wrap(li) else { continue };
+        let mut inner = collect_spans(&li_el, SpanStyle::Plain);
+        trim_span_edges(&mut inner);
+        if inner.is_empty() { continue; }
+        let prefix = match kind {
+            ListKind::Unordered => "• ".to_string(),
+            ListKind::Ordered => format!("{idx}. "),
+        };
+        let mut spans = vec![Span::plain(prefix)];
+        spans.extend(inner);
+        out.push(Block::Paragraph { spans });
+        idx += 1;
+    }
+}
+
+fn emit_table(el: &ElementRef, out: &mut Vec<Block>) {
+    for row in el.descendants() {
+        let Node::Element(e) = row.value() else { continue };
+        if e.name() != "tr" { continue; }
+        let Some(tr_el) = ElementRef::wrap(row) else { continue };
+        let mut cells = Vec::new();
+        for cell in tr_el.children() {
+            let Node::Element(ce) = cell.value() else { continue };
+            if ce.name() != "td" && ce.name() != "th" { continue; }
+            let Some(cell_el) = ElementRef::wrap(cell) else { continue };
+            let mut cell_spans = collect_spans(&cell_el, SpanStyle::Plain);
+            trim_span_edges(&mut cell_spans);
+            let text: String = cell_spans
+                .into_iter()
+                .map(|s| s.text)
+                .collect::<Vec<_>>()
+                .join("");
+            cells.push(text);
+        }
+        if !cells.is_empty() {
+            out.push(Block::Paragraph {
+                spans: vec![Span::plain(cells.join("  "))],
+            });
+        }
+    }
+}
+
 fn collect_spans(el: &ElementRef, current_style: SpanStyle) -> Vec<Span> {
     let mut spans = Vec::new();
     for child in el.children() {
@@ -135,6 +218,11 @@ fn collect_spans(el: &ElementRef, current_style: SpanStyle) -> Vec<Span> {
             Node::Element(e) => {
                 let Some(child_el) = ElementRef::wrap(child) else { continue };
                 let tag = e.name();
+                if tag == "br" {
+                    // Inline <br>: treat as a soft space; the wrapper handles visual breaks.
+                    spans.push(Span { text: " ".into(), style: current_style });
+                    continue;
+                }
                 let next_style = match (current_style, tag) {
                     (SpanStyle::Plain, "b" | "strong") => SpanStyle::Bold,
                     (SpanStyle::Plain, "i" | "em") => SpanStyle::Italic,
@@ -390,5 +478,113 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn blockquote_renders_italic_with_indent() {
+        let blocks = html_to_blocks(
+            "<html><body><blockquote>quoted</blockquote></body></html>",
+        );
+        match &blocks[0] {
+            Block::Paragraph { spans } => {
+                assert!(spans[0].text.starts_with("    "));
+                assert_eq!(spans[1].style, SpanStyle::Italic);
+                assert_eq!(spans[1].text, "quoted");
+            }
+            _ => panic!("expected paragraph"),
+        }
+    }
+
+    #[test]
+    fn unordered_list_uses_bullet_prefix() {
+        let blocks = html_to_blocks(
+            "<html><body><ul><li>a</li><li>b</li></ul></body></html>",
+        );
+        assert_eq!(blocks.len(), 2);
+        match &blocks[0] {
+            Block::Paragraph { spans } => assert!(spans[0].text.starts_with("• ")),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn ordered_list_uses_numeric_prefix() {
+        let blocks = html_to_blocks(
+            "<html><body><ol><li>a</li><li>b</li></ol></body></html>",
+        );
+        match (&blocks[0], &blocks[1]) {
+            (Block::Paragraph { spans: a }, Block::Paragraph { spans: b }) => {
+                assert!(a[0].text.starts_with("1. "));
+                assert!(b[0].text.starts_with("2. "));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn hr_renders_as_separator_line() {
+        let blocks = html_to_blocks("<html><body><hr/></body></html>");
+        match &blocks[0] {
+            Block::Paragraph { spans } => assert_eq!(spans[0].text, "─ ─ ─"),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn img_with_alt_renders_as_placeholder() {
+        let blocks = html_to_blocks(
+            r#"<html><body><img alt="ship in flight" /></body></html>"#,
+        );
+        match &blocks[0] {
+            Block::Paragraph { spans } => {
+                assert_eq!(spans[0].text, "[image: ship in flight]")
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn img_without_alt_is_skipped() {
+        let blocks = html_to_blocks(r#"<html><body><img src="x.jpg"/></body></html>"#);
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn anchor_renders_text_only() {
+        let blocks = html_to_blocks(
+            r##"<html><body><p>see <a href="#x">page 7</a></p></body></html>"##,
+        );
+        match &blocks[0] {
+            Block::Paragraph { spans } => {
+                let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+                assert!(text.contains("see") && text.contains("page 7"));
+                assert!(!text.contains("href"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn br_inside_paragraph_becomes_space() {
+        let blocks = html_to_blocks(
+            "<html><body><p>line1<br/>line2</p></body></html>",
+        );
+        match &blocks[0] {
+            Block::Paragraph { spans } => {
+                let combined: String = spans.iter().map(|s| s.text.clone()).collect();
+                assert!(combined.contains("line1") && combined.contains("line2"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn table_renders_one_row_per_paragraph() {
+        let html = "<html><body><table>\
+            <tr><td>a</td><td>b</td></tr>\
+            <tr><td>c</td><td>d</td></tr>\
+        </table></body></html>";
+        let blocks = html_to_blocks(html);
+        assert_eq!(blocks.len(), 2);
     }
 }
