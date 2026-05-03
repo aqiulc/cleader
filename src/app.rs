@@ -18,6 +18,9 @@ pub struct App {
 
 impl App {
     pub fn new(book: Book, persistence: Persistence, viewport: (u16, u16)) -> Self {
+        // Invariant: Book::open returns EpubError::NoChapters for empty books,
+        // so reaching here with no chapters is a programmer error elsewhere.
+        debug_assert!(!book.chapters.is_empty(), "App requires at least one chapter");
         let key = book.path.to_string_lossy().into_owned();
         let (chapter_idx, line_offset) = match persistence.get(&key) {
             Some(p) if (p.chapter_idx as usize) < book.chapters.len() => {
@@ -176,5 +179,71 @@ mod tests {
         let book = book_with_chapters(vec![vec![p("a")], vec![p("b")]]);
         let app = App::new(book, p_handle, (80, 24));
         assert_eq!(app.chapter_idx(), 1);
+    }
+
+    #[test]
+    fn new_app_falls_back_to_zero_when_chapter_idx_out_of_range() {
+        // Registry knows about a book that's since been re-encoded with
+        // fewer chapters. Stale chapter_idx must not crash.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        {
+            let mut p_handle = Persistence::open_at(path.clone());
+            p_handle.upsert(
+                "/test/book.epub".into(),
+                Position {
+                    title: "T".into(),
+                    author: "A".into(),
+                    chapter_idx: 99,
+                    line_offset: 50,
+                    last_read: Utc::now(),
+                },
+            );
+            p_handle.flush().unwrap();
+        }
+        let p_handle = Persistence::open_at(path);
+        let book = book_with_chapters(vec![vec![p("only one")]]);
+        let app = App::new(book, p_handle, (80, 24));
+        assert_eq!(app.chapter_idx(), 0);
+        assert_eq!(app.line_offset(), 0);
+    }
+
+    #[test]
+    fn new_app_clamps_line_offset_when_chapter_shrank() {
+        // Registry has a line offset that's larger than the new wrapped
+        // chapter. Clamp to the last available line rather than panic.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        {
+            let mut p_handle = Persistence::open_at(path.clone());
+            p_handle.upsert(
+                "/test/book.epub".into(),
+                Position {
+                    title: "T".into(),
+                    author: "A".into(),
+                    chapter_idx: 0,
+                    line_offset: 9999,
+                    last_read: Utc::now(),
+                },
+            );
+            p_handle.flush().unwrap();
+        }
+        let p_handle = Persistence::open_at(path);
+        let book = book_with_chapters(vec![vec![p("short")]]);
+        let app = App::new(book, p_handle, (80, 24));
+        // Wrapped chapter has at most a few lines; offset must be clamped
+        // to wrapped.len()-1.
+        assert!(app.line_offset() < app.wrapped().len().max(1));
+    }
+
+    #[test]
+    fn page_and_total_pages_default_to_one_for_empty_chapter() {
+        // A chapter with nothing to wrap should render as "Page 1 / 1"
+        // rather than "Page 1 / 0" (the .max(1) floor on total_pages).
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![Block::Blank]]);
+        let app = App::new(book, p_handle, (80, 24));
+        assert_eq!(app.page(), 1);
+        assert_eq!(app.total_pages(), 1);
     }
 }
