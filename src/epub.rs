@@ -116,7 +116,11 @@ fn walk_block_level(el: &ElementRef, out: &mut Vec<Block>) {
                 }
                 "table" => emit_table(&child_el, out),
                 "br" => {
-                    // Stand-alone <br> outside a paragraph: emit a blank.
+                    // Stand-alone <br> at block level: emit Block::Blank.
+                    // Rare in real EPUBs (most use <p></p> for spacing) and
+                    // consecutive <br/><br/> would produce consecutive Blanks
+                    // — acceptable for v1; the renderer can collapse runs if
+                    // it ever matters.
                     out.push(Block::Blank);
                 }
                 _ => walk_block_level(&child_el, out),
@@ -179,6 +183,11 @@ fn emit_list(el: &ElementRef, out: &mut Vec<Block>, kind: ListKind) {
 }
 
 fn emit_table(el: &ElementRef, out: &mut Vec<Block>) {
+    // descendants() handles the common <tbody> wrapping case. Caveat: a
+    // nested <table> inside a <td> would have its rows emitted twice
+    // (once as part of the outer cell's flattened text, once as their
+    // own row paragraphs). v1 fiction never nests tables; v2 may want
+    // to filter to direct-table descendants.
     for row in el.descendants() {
         let Node::Element(e) = row.value() else { continue };
         if e.name() != "tr" { continue; }
@@ -558,7 +567,7 @@ mod tests {
             Block::Paragraph { spans } => {
                 let text: String = spans.iter().map(|s| s.text.as_str()).collect();
                 assert!(text.contains("see") && text.contains("page 7"));
-                assert!(!text.contains("href"));
+                assert!(!text.contains("#x"), "URL fragment must not leak into rendered text");
             }
             _ => panic!(),
         }
@@ -586,5 +595,18 @@ mod tests {
         </table></body></html>";
         let blocks = html_to_blocks(html);
         assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn table_with_tbody_wrapper_still_renders_rows() {
+        // Most EPUB tooling auto-wraps <tr> in <tbody>; descendants() is
+        // what makes that work. Without this test, swapping to children()
+        // would silently break tbody-wrapped tables.
+        let html = "<html><body><table><tbody>\
+            <tr><td>x</td><td>y</td></tr>\
+            <tr><td>z</td></tr>\
+        </tbody></table></body></html>";
+        let blocks = html_to_blocks(html);
+        assert_eq!(blocks.len(), 2, "tbody wrapper must not hide rows");
     }
 }
