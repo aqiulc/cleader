@@ -112,11 +112,27 @@ impl App {
         match action {
             Action::LineDown => self.line_down(),
             Action::LineUp => self.line_up(),
+            Action::PageNext => {
+                self.page_next();
+                self.save();
+            }
+            Action::PagePrev => {
+                self.page_prev();
+                self.save();
+            }
+            Action::ChapterNext => {
+                self.chapter_next();
+                self.save();
+            }
+            Action::ChapterPrev => {
+                self.chapter_prev();
+                self.save();
+            }
+            Action::Resize(w, h) => self.resize(w, h),
             Action::Quit => {
                 self.save();
                 self.should_quit = true;
             }
-            _ => {}
         }
     }
 
@@ -142,6 +158,57 @@ impl App {
             let prev = self.chapter_idx - 1;
             // We'll set offset to last line after re-wrap.
             self.load_chapter(prev, usize::MAX);
+        }
+    }
+
+    fn page_next(&mut self) {
+        let step = self.lines_per_page();
+        let new_offset = self.line_offset + step;
+        if new_offset < self.wrapped.len() {
+            self.line_offset = new_offset;
+        } else if self.chapter_idx + 1 < self.book.chapters.len() {
+            self.load_chapter(self.chapter_idx + 1, 0);
+        }
+        // Else: stay put — last page of last chapter.
+    }
+
+    fn page_prev(&mut self) {
+        let step = self.lines_per_page();
+        if self.line_offset >= step {
+            self.line_offset -= step;
+        } else if self.line_offset > 0 {
+            self.line_offset = 0;
+        } else if self.chapter_idx > 0 {
+            self.load_chapter(self.chapter_idx - 1, usize::MAX);
+        }
+    }
+
+    fn chapter_next(&mut self) {
+        if self.chapter_idx + 1 < self.book.chapters.len() {
+            self.load_chapter(self.chapter_idx + 1, 0);
+        }
+    }
+
+    fn chapter_prev(&mut self) {
+        if self.chapter_idx > 0 {
+            self.load_chapter(self.chapter_idx - 1, 0);
+        }
+    }
+
+    fn resize(&mut self, w: u16, h: u16) {
+        if (w, h) == self.viewport_size {
+            return;
+        }
+        let width_changed = w != self.viewport_size.0;
+        self.viewport_size = (w, h);
+        if width_changed {
+            self.wrapped = wrap_chapter(
+                &self.book.chapters[self.chapter_idx].blocks,
+                body_text_width(self.viewport_size.0),
+            );
+            self.line_offset = self
+                .line_offset
+                .min(self.wrapped.len().saturating_sub(1));
         }
     }
 }
@@ -359,5 +426,98 @@ mod tests {
         assert!(!app.should_quit());
         app.handle(Action::Quit);
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn page_next_advances_by_lines_per_page() {
+        let (p_handle, _dir) = fresh_persistence();
+        // Long content so we have multiple pages.
+        let mut blocks = Vec::new();
+        for _ in 0..50 {
+            blocks.push(p("the quick brown fox jumps over the lazy dog"));
+        }
+        let book = book_with_chapters(vec![blocks]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        let lines_per_page = 23;
+        app.handle(Action::PageNext);
+        assert_eq!(app.line_offset(), lines_per_page);
+    }
+
+    #[test]
+    fn page_next_past_chapter_end_advances_chapter() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("short")], vec![p("next")]]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        app.handle(Action::PageNext);
+        assert_eq!(app.chapter_idx(), 1);
+        assert_eq!(app.line_offset(), 0);
+    }
+
+    #[test]
+    fn page_prev_at_start_of_chapter_goes_to_previous_chapter() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("ch1")], vec![p("ch2")]]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        app.handle(Action::ChapterNext);
+        assert_eq!(app.chapter_idx(), 1);
+        app.handle(Action::PagePrev);
+        assert_eq!(app.chapter_idx(), 0);
+    }
+
+    #[test]
+    fn chapter_next_loads_next_chapter() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("a")], vec![p("b")], vec![p("c")]]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        app.handle(Action::ChapterNext);
+        assert_eq!(app.chapter_idx(), 1);
+        app.handle(Action::ChapterNext);
+        assert_eq!(app.chapter_idx(), 2);
+        app.handle(Action::ChapterNext);
+        assert_eq!(app.chapter_idx(), 2); // no-op at end
+    }
+
+    #[test]
+    fn resize_changes_viewport_and_rewraps_when_width_changes() {
+        let (p_handle, _dir) = fresh_persistence();
+        let blocks = vec![p("the quick brown fox jumps over the lazy dog")];
+        let book = book_with_chapters(vec![blocks]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        let lines_at_80 = app.wrapped().len();
+        app.handle(Action::Resize(40, 24));
+        let lines_at_40 = app.wrapped().len();
+        assert!(lines_at_40 >= lines_at_80, "narrower terminal should wrap to more lines");
+        assert_eq!(app.viewport_size(), (40, 24));
+    }
+
+    #[test]
+    fn resize_height_only_does_not_rewrap() {
+        let (p_handle, _dir) = fresh_persistence();
+        let blocks = vec![p("hello world")];
+        let book = book_with_chapters(vec![blocks]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        let lines_before = app.wrapped().len();
+        app.handle(Action::Resize(80, 50));
+        let lines_after = app.wrapped().len();
+        assert_eq!(lines_before, lines_after);
+        assert_eq!(app.viewport_size(), (80, 50));
+    }
+
+    #[test]
+    fn page_next_persists_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let p_handle = Persistence::open_at(path.clone());
+        let mut blocks = Vec::new();
+        for _ in 0..50 {
+            blocks.push(p("the quick brown fox jumps"));
+        }
+        let book = book_with_chapters(vec![blocks]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        app.handle(Action::PageNext);
+        // Re-open the persistence handle and verify the offset was saved.
+        let reopened = Persistence::open_at(path);
+        let pos = reopened.get("/test/book.epub").expect("position saved");
+        assert!(pos.line_offset > 0);
     }
 }
