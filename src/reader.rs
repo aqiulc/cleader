@@ -283,4 +283,44 @@ mod tests {
             assert!(w <= 6, "line {:?} exceeds width 6 (got {})", line_text(line), w);
         }
     }
+
+    #[test]
+    fn italic_span_keeps_italic_modifier() {
+        let blocks = vec![Block::Paragraph {
+            spans: vec![Span::italic("hi")],
+        }];
+        let lines = wrap_chapter(&blocks, 80);
+        assert!(
+            lines[0].spans[0].style.add_modifier.contains(Modifier::ITALIC),
+            "italic span must keep ITALIC modifier"
+        );
+    }
+
+    #[test]
+    fn bold_span_split_across_two_lines_keeps_bold_on_both() {
+        // Force a wrap by using a narrow width.
+        let blocks = vec![Block::Paragraph {
+            spans: vec![
+                Span::plain("aaa "),
+                Span::bold("bbb ccc ddd eee fff"),
+            ],
+        }];
+        let lines = wrap_chapter(&blocks, 12);
+        // Find bold segments across all output lines; expect at least 2
+        // distinct line positions where a bold span appears.
+        let mut bold_lines = 0;
+        for line in &lines {
+            let any_bold = line.spans.iter().any(|s| {
+                s.style.add_modifier.contains(Modifier::BOLD)
+                    && !s.content.trim().is_empty()
+            });
+            if any_bold {
+                bold_lines += 1;
+            }
+        }
+        assert!(
+            bold_lines >= 2,
+            "bold modifier must survive across wrap; bold appeared on {bold_lines} line(s)"
+        );
+    }
 }
