@@ -98,22 +98,26 @@ fn walk_block_level(el: &ElementRef, out: &mut Vec<Block>) {
 /// Trim leading whitespace from the first span and trailing whitespace from
 /// the last span. Inter-span whitespace is preserved.
 fn trim_span_edges(spans: &mut Vec<Span>) {
-    if let Some(first) = spans.first_mut() {
+    while let Some(first) = spans.first_mut() {
         let trimmed = first.text.trim_start();
         if trimmed.len() != first.text.len() {
             first.text = trimmed.to_string();
         }
         if first.text.is_empty() {
             spans.remove(0);
+        } else {
+            break;
         }
     }
-    if let Some(last) = spans.last_mut() {
+    while let Some(last) = spans.last_mut() {
         let trimmed = last.text.trim_end();
         if trimmed.len() != last.text.len() {
             last.text = trimmed.to_string();
         }
         if last.text.is_empty() {
             spans.pop();
+        } else {
+            break;
         }
     }
 }
@@ -131,9 +135,9 @@ fn collect_spans(el: &ElementRef, current_style: SpanStyle) -> Vec<Span> {
             Node::Element(e) => {
                 let Some(child_el) = ElementRef::wrap(child) else { continue };
                 let tag = e.name();
-                let next_style = match tag {
-                    "b" | "strong" => SpanStyle::Bold,
-                    "i" | "em" => SpanStyle::Italic,
+                let next_style = match (current_style, tag) {
+                    (SpanStyle::Plain, "b" | "strong") => SpanStyle::Bold,
+                    (SpanStyle::Plain, "i" | "em") => SpanStyle::Italic,
                     _ => current_style,
                 };
                 spans.extend(collect_spans(&child_el, next_style));
@@ -304,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn bold_tag_produces_bold_span() {
+    fn bold_tag_produces_bold_span_and_preserves_whitespace() {
         let blocks = html_to_blocks(
             "<html><body><p>plain <b>bold</b> plain</p></body></html>",
         );
@@ -315,6 +319,8 @@ mod tests {
                 assert_eq!(spans[1].style, SpanStyle::Bold);
                 assert_eq!(spans[1].text, "bold");
                 assert_eq!(spans[2].style, SpanStyle::Plain);
+                let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+                assert_eq!(joined, "plain bold plain", "inter-span whitespace must survive");
             }
             _ => panic!("expected paragraph"),
         }
@@ -327,7 +333,7 @@ mod tests {
         );
         match &blocks[0] {
             Block::Paragraph { spans } => assert_eq!(spans[0].style, SpanStyle::Bold),
-            _ => panic!(),
+            _ => panic!("expected paragraph for <strong>"),
         }
     }
 
@@ -338,8 +344,51 @@ mod tests {
             let blocks = html_to_blocks(&html);
             match &blocks[0] {
                 Block::Paragraph { spans } => assert_eq!(spans[0].style, SpanStyle::Italic),
-                _ => panic!(),
+                _ => panic!("expected paragraph for tag <{tag}>"),
             }
+        }
+    }
+
+    #[test]
+    fn nested_emphasis_outermost_style_wins() {
+        // Per SpanStyle's doc comment: outermost style wins. Inner tag is
+        // parsed but its style is overridden.
+        let blocks = html_to_blocks(
+            "<html><body><p><b><i>foo</i></b></p></body></html>",
+        );
+        match &blocks[0] {
+            Block::Paragraph { spans } => {
+                assert_eq!(spans.len(), 1);
+                assert_eq!(spans[0].text, "foo");
+                assert_eq!(spans[0].style, SpanStyle::Bold, "outer <b> wins over inner <i>");
+            }
+            _ => panic!("expected paragraph"),
+        }
+
+        // Symmetric case: outer <i>, inner <b>.
+        let blocks = html_to_blocks(
+            "<html><body><p><i><b>bar</b></i></p></body></html>",
+        );
+        match &blocks[0] {
+            Block::Paragraph { spans } => {
+                assert_eq!(spans.len(), 1);
+                assert_eq!(spans[0].style, SpanStyle::Italic, "outer <i> wins over inner <b>");
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn edge_trim_preserves_inter_span_whitespace() {
+        let blocks = html_to_blocks(
+            "<html><body><p>  start <em>middle</em> end  </p></body></html>",
+        );
+        match &blocks[0] {
+            Block::Paragraph { spans } => {
+                let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+                assert_eq!(joined, "start middle end");
+            }
+            _ => panic!(),
         }
     }
 }
