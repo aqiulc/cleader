@@ -71,7 +71,9 @@ fn walk_block_level(el: &ElementRef, out: &mut Vec<Block>) {
             match tag {
                 "p" => {
                     let spans = collect_spans(&child_el, SpanStyle::Plain);
-                    if !spans.is_empty() {
+                    if spans.is_empty() {
+                        out.push(Block::Blank);
+                    } else {
                         out.push(Block::Paragraph { spans });
                     }
                 }
@@ -107,7 +109,7 @@ fn collapse_whitespace(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_space = false;
     for ch in s.chars() {
-        if ch.is_whitespace() {
+        if ch.is_ascii_whitespace() {
             if !prev_space {
                 out.push(' ');
                 prev_space = true;
@@ -176,5 +178,31 @@ mod tests {
             "<html><body><div><section><p>nested</p></section></div></body></html>",
         );
         assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn nbsp_is_preserved_through_collapse() {
+        let blocks = html_to_blocks(
+            "<html><body><p>Mr.\u{00A0}Smith\u{00A0}lives here.</p></body></html>",
+        );
+        match &blocks[0] {
+            Block::Paragraph { spans } => {
+                let text = &spans[0].text;
+                assert!(text.contains('\u{00A0}'), "NBSP must survive whitespace collapse");
+                assert_eq!(text, "Mr.\u{00A0}Smith\u{00A0}lives here.");
+            }
+            _ => panic!("expected paragraph"),
+        }
+    }
+
+    #[test]
+    fn empty_paragraph_becomes_blank_block() {
+        let blocks = html_to_blocks(
+            "<html><body><p>before</p><p></p><p>after</p></body></html>",
+        );
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(blocks[0], Block::Paragraph { .. }));
+        assert!(matches!(blocks[1], Block::Blank));
+        assert!(matches!(blocks[2], Block::Paragraph { .. }));
     }
 }
