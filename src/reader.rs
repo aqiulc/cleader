@@ -208,6 +208,68 @@ fn truncate_right(s: &str, budget: usize) -> String {
     acc
 }
 
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::Frame;
+
+pub struct RenderInput<'a> {
+    pub wrapped: &'a [Line<'static>],
+    pub line_offset: usize,
+    pub status: StatusInput<'a>,
+}
+
+const MAX_BODY_WIDTH: u16 = 80;
+const BODY_LEFT_PAD: u16 = 3;
+
+pub fn render(frame: &mut Frame, area: Rect, input: RenderInput<'_>) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+    let body_area = chunks[0];
+    let status_area = chunks[1];
+
+    // Compute centered body column, capped at MAX_BODY_WIDTH.
+    let body_width = body_area.width.min(MAX_BODY_WIDTH);
+    let h_offset = (body_area.width - body_width) / 2;
+    let body_rect = Rect {
+        x: body_area.x + h_offset,
+        y: body_area.y,
+        width: body_width,
+        height: body_area.height,
+    };
+
+    // Slice the visible window of wrapped lines.
+    let visible_rows = body_rect.height as usize;
+    let end = (input.line_offset + visible_rows).min(input.wrapped.len());
+    let visible = &input.wrapped[input.line_offset.min(input.wrapped.len())..end];
+    let owned: Vec<Line<'static>> = visible.to_vec();
+
+    let body = Paragraph::new(owned)
+        .wrap(Wrap { trim: false });
+    // Add left padding by inset.
+    let padded = Rect {
+        x: body_rect.x + BODY_LEFT_PAD,
+        y: body_rect.y,
+        width: body_rect.width.saturating_sub(BODY_LEFT_PAD),
+        height: body_rect.height,
+    };
+    frame.render_widget(body, padded);
+
+    let status_str = build_status_bar(input.status);
+    let status = Paragraph::new(status_str)
+        .style(Style::default().add_modifier(Modifier::DIM));
+    frame.render_widget(status, status_area);
+}
+
+/// Width in columns the wrap step should target, given the terminal width.
+pub fn body_text_width(terminal_width: u16) -> u16 {
+    terminal_width
+        .min(MAX_BODY_WIDTH)
+        .saturating_sub(BODY_LEFT_PAD)
+        .max(20)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +508,18 @@ mod tests {
         });
         // Just must not panic.
         let _ = bar;
+    }
+
+    #[test]
+    fn body_text_width_caps_at_max() {
+        assert_eq!(body_text_width(200), MAX_BODY_WIDTH - BODY_LEFT_PAD);
+        assert_eq!(body_text_width(80), 80 - BODY_LEFT_PAD);
+        assert_eq!(body_text_width(40), 40 - BODY_LEFT_PAD);
+    }
+
+    #[test]
+    fn body_text_width_floors_at_20() {
+        // Tiny terminal.
+        assert_eq!(body_text_width(10), 20);
     }
 }
