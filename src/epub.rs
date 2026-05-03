@@ -1,5 +1,11 @@
 use std::path::PathBuf;
 
+/// Inline styling for a span of text.
+///
+/// v1 does not combine bold and italic. When the source markup nests them
+/// (e.g. `<b><i>foo</i></b>`), the HTML walker keeps the outermost style
+/// — the inner tag is parsed but its style is overridden. Real fiction
+/// almost never relies on bold+italic; bitflags are a v2 concern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpanStyle {
     Plain,
