@@ -1,6 +1,9 @@
+use crate::error::PersistenceError;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::Path;
 
 const REGISTRY_VERSION: u32 = 1;
 
@@ -31,8 +34,6 @@ impl Default for Registry {
     }
 }
 
-use std::path::Path;
-
 pub fn load_from(path: &Path) -> Registry {
     match std::fs::read_to_string(path) {
         Ok(s) => match serde_json::from_str::<Registry>(&s) {
@@ -58,6 +59,21 @@ pub fn load_from(path: &Path) -> Registry {
             Registry::default()
         }
     }
+}
+
+pub fn save_to(path: &Path, registry: &Registry) -> Result<(), PersistenceError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_extension("json.tmp");
+    {
+        let mut tmp = std::fs::File::create(&tmp_path)?;
+        let bytes = serde_json::to_vec_pretty(registry)?;
+        tmp.write_all(&bytes)?;
+        tmp.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -144,5 +160,43 @@ mod tests {
         let reg = load_from(&path);
         assert_eq!(reg.version, 1);
         assert!(reg.books.is_empty());
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let mut reg = Registry::default();
+        reg.books.insert(
+            "/book.epub".into(),
+            Position {
+                title: "X".into(),
+                author: "Y".into(),
+                chapter_idx: 2,
+                line_offset: 7,
+                last_read: Utc::now(),
+            },
+        );
+        save_to(&path, &reg).unwrap();
+        let loaded = load_from(&path);
+        assert_eq!(loaded.books.len(), 1);
+        assert_eq!(loaded.books["/book.epub"].chapter_idx, 2);
+    }
+
+    #[test]
+    fn save_creates_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/deeper/registry.json");
+        let reg = Registry::default();
+        save_to(&path, &reg).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn save_does_not_leave_tmp_file_on_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        save_to(&path, &Registry::default()).unwrap();
+        assert!(!path.with_extension("json.tmp").exists());
     }
 }
