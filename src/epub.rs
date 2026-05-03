@@ -78,8 +78,10 @@ fn walk_block_level(el: &ElementRef, out: &mut Vec<Block>) {
                     }
                 }
                 "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                    // Match arm guarantees tag is "h1".."h6", all 2-byte ASCII; byte 1 is the digit.
                     let level = tag.as_bytes()[1] - b'0';
                     let spans = collect_spans(&child_el, SpanStyle::Plain);
+                    // Empty heading: drop (no spacer convention for headings, unlike <p>).
                     if !spans.is_empty() {
                         out.push(Block::Heading { level, spans });
                         out.push(Block::Blank);
@@ -228,14 +230,55 @@ mod tests {
     }
 
     #[test]
-    fn all_heading_levels_are_recognised() {
+    fn all_heading_levels_extract_correct_level_with_trailing_blank() {
         for n in 1..=6u8 {
             let html = format!("<html><body><h{n}>x</h{n}></body></html>");
             let blocks = html_to_blocks(&html);
+            assert_eq!(blocks.len(), 2, "level {n}: expected heading + blank");
             match &blocks[0] {
                 Block::Heading { level, .. } => assert_eq!(*level, n),
                 _ => panic!("expected heading at level {n}"),
             }
+            assert!(matches!(blocks[1], Block::Blank), "level {n}: expected trailing Blank");
+        }
+    }
+
+    #[test]
+    fn empty_heading_is_dropped() {
+        let blocks = html_to_blocks(
+            "<html><body><p>before</p><h1></h1><p>after</p></body></html>",
+        );
+        assert_eq!(blocks.len(), 2, "empty heading should produce no block (no Blank)");
+    }
+
+    #[test]
+    fn heading_with_inline_em_is_currently_flat_plain() {
+        // Pre-Task-11 / Pre-Task-14 behavior pin. Two things will change in
+        // future tasks; this test fails deliberately when either lands:
+        //   (1) <em> inside a heading is currently rendered as a plain span;
+        //       Task 11 will switch to SpanStyle::Italic.
+        //   (2) Adjacent text nodes lose their separating space because
+        //       collapse_whitespace trims each text node individually
+        //       ("Part " + "One" -> "Part" + "One" -> "PartOne"). This is a
+        //       known cross-span-space-loss bug to be fixed alongside Task 11
+        //       (when collect_spans is restructured) or in Task 14's wrap
+        //       layer if it survives that long.
+        let blocks = html_to_blocks(
+            "<html><body><h1>Part <em>One</em></h1></body></html>",
+        );
+        match &blocks[0] {
+            Block::Heading { spans, .. } => {
+                assert!(
+                    spans.iter().all(|s| s.style == SpanStyle::Plain),
+                    "pre-Task-11: <em> not yet styled"
+                );
+                let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+                assert_eq!(
+                    joined, "PartOne",
+                    "pre-fix: cross-span space is lost; Task 11 or Task 14 should fix"
+                );
+            }
+            _ => panic!("expected heading"),
         }
     }
 }
