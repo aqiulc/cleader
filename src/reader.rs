@@ -140,8 +140,9 @@ const STATUS_RIGHT: &str = "q quit";
 
 pub struct StatusInput<'a> {
     pub title: &'a str,
-    pub chapter_idx: usize,
-    pub chapter_count: usize,
+    /// `Some((current_1based, total_main))` when on a main chapter;
+    /// `None` when on front matter (e.g., the cover).
+    pub chapter_display: Option<(usize, usize)>,
     pub page: usize,
     pub total_pages: usize,
     pub width: u16,
@@ -153,13 +154,13 @@ pub fn build_status_bar(s: StatusInput<'_>) -> String {
         return "".into();
     }
 
-    let progress = format!(
-        " ── Ch {}/{} ─ Page {}/{} ─ ",
-        s.chapter_idx + 1,
-        s.chapter_count,
-        s.page,
-        s.total_pages
-    );
+    let progress = match s.chapter_display {
+        Some((cur, total)) => format!(
+            " ── Ch {}/{} ─ Page {}/{} ─ ",
+            cur, total, s.page, s.total_pages
+        ),
+        None => format!(" ── Page {}/{} ─ ", s.page, s.total_pages),
+    };
     let right = format!(" {STATUS_RIGHT} ");
 
     // Reserve space (in unicode columns, NOT bytes) for: leading `── ` (3),
@@ -474,8 +475,7 @@ mod tests {
     fn status_bar_fits_exact_terminal_width() {
         let bar = build_status_bar(StatusInput {
             title: "Firefly",
-            chapter_idx: 3,
-            chapter_count: 22,
+            chapter_display: Some((4, 22)),
             page: 18,
             total_pages: 247,
             width: 80,
@@ -491,8 +491,7 @@ mod tests {
     fn status_bar_truncates_long_title_with_ellipsis_on_right() {
         let bar = build_status_bar(StatusInput {
             title: "An Extremely Long Book Title That Will Not Fit",
-            chapter_idx: 0,
-            chapter_count: 1,
+            chapter_display: Some((1, 1)),
             page: 1,
             total_pages: 1,
             width: 50,
@@ -509,14 +508,27 @@ mod tests {
     fn status_bar_with_tiny_width_does_not_panic() {
         let bar = build_status_bar(StatusInput {
             title: "X",
-            chapter_idx: 0,
-            chapter_count: 1,
+            chapter_display: Some((1, 1)),
             page: 1,
             total_pages: 1,
             width: 3,
         });
         // Just must not panic.
         let _ = bar;
+    }
+
+    #[test]
+    fn status_bar_omits_chapter_segment_when_chapter_display_is_none() {
+        let bar = build_status_bar(StatusInput {
+            title: "Cover",
+            chapter_display: None,
+            page: 1,
+            total_pages: 1,
+            width: 60,
+        });
+        assert!(!bar.contains("Ch "), "front matter should not show chapter number; got {bar:?}");
+        assert!(bar.contains("Page 1/1"));
+        assert_eq!(UnicodeWidthStr::width(bar.as_str()), 60);
     }
 
     #[test]

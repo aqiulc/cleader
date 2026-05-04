@@ -44,10 +44,21 @@ pub enum Block {
     Blank,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChapterKind {
+    /// Counts toward the chapter numbering displayed to the reader.
+    Main,
+    /// Excluded from chapter numbering — typically a cover or other
+    /// image-only TOC-listed page that has no real prose. Still
+    /// reachable via page-by-page navigation.
+    FrontMatter,
+}
+
 #[derive(Debug, Clone)]
 pub struct Chapter {
     pub title: Option<String>,
     pub blocks: Vec<Block>,
+    pub kind: ChapterKind,
 }
 
 #[derive(Debug, Clone)]
@@ -294,25 +305,37 @@ fn strip_fragment(p: &Path) -> PathBuf {
     }
 }
 
-/// Return true if the only meaningful content of `blocks` is a single
-/// `[image: ...]` placeholder paragraph.
+/// Classify a chapter as Main (real prose) or FrontMatter (image-only).
 ///
-/// This is the cover-as-chapter pattern: an XHTML file whose body is just
-/// `<img alt="…">` and which we render as a single `[image: …]` paragraph.
-/// Even when the EPUB's TOC explicitly references such a page, treating it
-/// as a chapter inflates the chapter count by 1 (the user-reported bug).
-/// `Block::Blank` filler is ignored when counting.
-fn is_image_only_chapter(blocks: &[Block]) -> bool {
-    let non_blank: Vec<&Block> =
-        blocks.iter().filter(|b| !matches!(b, Block::Blank)).collect();
-    if non_blank.len() != 1 {
-        return false;
-    }
-    match non_blank[0] {
-        Block::Paragraph { spans } => {
-            spans.len() == 1 && spans[0].text.starts_with("[image:")
+/// A chapter is "front matter" if its only meaningful content is a
+/// single image placeholder. The cover is the canonical example.
+/// FrontMatter chapters stay in `book.chapters` (so navigation can
+/// reach them and a future image renderer can read them) but they
+/// are excluded from the user-visible chapter numbering.
+fn classify(blocks: &[Block]) -> ChapterKind {
+    let mut saw_real = false;
+    let mut saw_image_only = false;
+    for b in blocks {
+        match b {
+            Block::Blank => {}
+            Block::Heading { .. } => {
+                saw_real = true;
+            }
+            Block::Paragraph { spans } => {
+                let is_image = spans.len() == 1
+                    && spans[0].text.starts_with("[image:");
+                if is_image {
+                    saw_image_only = true;
+                } else {
+                    saw_real = true;
+                }
+            }
         }
-        _ => false,
+    }
+    if !saw_real && saw_image_only {
+        ChapterKind::FrontMatter
+    } else {
+        ChapterKind::Main
     }
 }
 
@@ -368,22 +391,23 @@ impl Book {
 
         let chapters: Vec<Chapter> = if toc_labels.is_empty() {
             all.into_iter()
-                .map(|(_, blocks)| Chapter { title: None, blocks })
+                .map(|(_, blocks)| {
+                    let kind = classify(&blocks);
+                    Chapter { title: None, blocks, kind }
+                })
                 .collect()
         } else {
             all.into_iter()
                 .filter_map(|(p, blocks)| {
-                    toc_labels
-                        .get(&p)
-                        .map(|label| Chapter { title: Some(label.clone()), blocks })
+                    toc_labels.get(&p).map(|label| {
+                        let kind = classify(&blocks);
+                        Chapter {
+                            title: Some(label.clone()),
+                            blocks,
+                            kind,
+                        }
+                    })
                 })
-                // Even when TOC-referenced, a "chapter" whose entire body is
-                // a single [image: ...] placeholder is a cover/title-image
-                // wrapper page, not real prose. (Threshold's TOC explicitly
-                // lists its cover; the user-reported bug is that the cover
-                // shows as Ch 1.) Drop those — the image was alt text, not
-                // narrative.
-                .filter(|c| !is_image_only_chapter(&c.blocks))
                 .collect()
         };
 

@@ -1,4 +1,4 @@
-use crate::epub::Book;
+use crate::epub::{Book, ChapterKind};
 use crate::input::Action;
 use crate::persistence::{Persistence, Position};
 use crate::reader::{body_text_width, wrap_chapter};
@@ -78,6 +78,29 @@ impl App {
 
     pub fn total_pages(&self) -> usize {
         self.wrapped.len().div_ceil(self.lines_per_page()).max(1)
+    }
+
+    /// `Some((1-based main-chapter index, total main chapters))` if the
+    /// current chapter is Main; `None` if it's FrontMatter.
+    pub fn main_chapter_position(&self) -> Option<(usize, usize)> {
+        let current_kind = self.book.chapters[self.chapter_idx].kind;
+        if !matches!(current_kind, ChapterKind::Main) {
+            return None;
+        }
+        let total = self
+            .book
+            .chapters
+            .iter()
+            .filter(|c| matches!(c.kind, ChapterKind::Main))
+            .count();
+        let current_1based = self
+            .book
+            .chapters
+            .iter()
+            .take(self.chapter_idx + 1)
+            .filter(|c| matches!(c.kind, ChapterKind::Main))
+            .count();
+        Some((current_1based, total))
     }
 
     fn load_chapter(&mut self, idx: usize, line_offset: usize) {
@@ -223,7 +246,7 @@ mod tests {
     fn book_with_chapters(chapters: Vec<Vec<Block>>) -> Book {
         let chs = chapters
             .into_iter()
-            .map(|blocks| Chapter { title: None, blocks })
+            .map(|blocks| Chapter { title: None, blocks, kind: ChapterKind::Main })
             .collect();
         Book {
             title: "T".into(),
@@ -235,6 +258,29 @@ mod tests {
 
     fn p(text: &str) -> Block {
         Block::Paragraph { spans: vec![Span::plain(text)] }
+    }
+
+    fn p_main(text: &str) -> Block {
+        Block::Paragraph { spans: vec![Span::plain(text)] }
+    }
+
+    fn p_image(alt: &str) -> Block {
+        Block::Paragraph {
+            spans: vec![Span::plain(format!("[image: {alt}]"))],
+        }
+    }
+
+    fn book_with_kinds(specs: Vec<(Vec<Block>, ChapterKind)>) -> Book {
+        let chs = specs
+            .into_iter()
+            .map(|(blocks, kind)| Chapter { title: None, blocks, kind })
+            .collect();
+        Book {
+            title: "T".into(),
+            author: "A".into(),
+            path: PathBuf::from("/test/book.epub"),
+            chapters: chs,
+        }
     }
 
     fn fresh_persistence() -> (Persistence, TempDir) {
@@ -501,6 +547,39 @@ mod tests {
         let lines_after = app.wrapped().len();
         assert_eq!(lines_before, lines_after);
         assert_eq!(app.viewport_size(), (80, 50));
+    }
+
+    #[test]
+    fn main_chapter_position_returns_none_for_front_matter() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_kinds(vec![
+            (vec![p_image("cover")], ChapterKind::FrontMatter),
+            (vec![p_main("ch1")], ChapterKind::Main),
+        ]);
+        let app = App::new(book, p_handle, (80, 24));
+        assert_eq!(app.chapter_idx(), 0);
+        assert!(app.main_chapter_position().is_none());
+    }
+
+    #[test]
+    fn main_chapter_position_counts_only_main_chapters() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_kinds(vec![
+            (vec![p_image("cover")], ChapterKind::FrontMatter),
+            (vec![p_main("ch1")], ChapterKind::Main),
+            (vec![p_main("ch2")], ChapterKind::Main),
+            (vec![p_main("ch3")], ChapterKind::Main),
+        ]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        // Walk to chapter 1 (the first Main chapter).
+        app.handle(Action::ChapterNext);
+        assert_eq!(app.chapter_idx(), 1);
+        assert_eq!(app.main_chapter_position(), Some((1, 3)));
+        // Walk to chapter 3 (the last).
+        app.handle(Action::ChapterNext);
+        app.handle(Action::ChapterNext);
+        assert_eq!(app.chapter_idx(), 3);
+        assert_eq!(app.main_chapter_position(), Some((3, 3)));
     }
 
     #[test]

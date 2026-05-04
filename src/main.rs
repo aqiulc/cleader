@@ -79,7 +79,6 @@ fn event_loop(
         terminal.draw(|frame| {
             let area = frame.area();
             let title = app.book().title.clone();
-            let chapter_count = app.book().chapters.len();
             render(
                 frame,
                 area,
@@ -88,8 +87,7 @@ fn event_loop(
                     line_offset: app.line_offset(),
                     status: StatusInput {
                         title: &title,
-                        chapter_idx: app.chapter_idx(),
-                        chapter_count,
+                        chapter_display: app.main_chapter_position(),
                         page: app.page(),
                         total_pages: app.total_pages(),
                         width: area.width,

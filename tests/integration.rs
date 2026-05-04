@@ -51,34 +51,23 @@ fn missing_path_returns_not_found_error() {
 }
 
 #[test]
-fn toc_filtering_drops_front_matter() {
-    // Threshold's spine includes a cover that produces non-empty blocks
-    // (alt text rendered as "[image: ...]"). Without TOC filtering it
-    // shows as Chapter 1; with filtering it should be excluded. We pin
-    // this against the Threshold fixture specifically — first_test_book()
-    // could pick a different EPUB depending on what's in books/.
+fn toc_filtering_classifies_front_matter() {
+    // Threshold's spine includes a cover; with the previous fix it was
+    // dropped from book.chapters entirely. The revised fix keeps it but
+    // marks it FrontMatter so the cover doesn't count toward chapter
+    // numbering. Verifies the classifier correctly identifies image-only
+    // chapters as FrontMatter.
     let path = PathBuf::from("books/Threshold (Will Wight).epub");
     if !path.exists() {
-        // Skip if the user removed this specific fixture.
         return;
     }
     let book = Book::open(&path).unwrap();
-    // The very first chapter should not be the bare cover image. A real
-    // chapter has actual paragraph text (more than one image-only block).
-    let first = &book.chapters[0];
-    let has_real_text = first.blocks.iter().any(|b| match b {
-        Block::Paragraph { spans } => {
-            spans.len() > 1
-                || spans
-                    .first()
-                    .map(|s| !s.text.starts_with("[image:"))
-                    .unwrap_or(false)
-        }
-        Block::Heading { .. } => true,
-        Block::Blank => false,
-    });
-    assert!(
-        has_real_text,
-        "first chapter should have real text, not just an image placeholder"
-    );
+    // The book should have at least one FrontMatter chapter (the cover).
+    let any_front = book.chapters.iter()
+        .any(|c| matches!(c.kind, cleader::epub::ChapterKind::FrontMatter));
+    assert!(any_front, "expected at least one FrontMatter chapter (cover)");
+    // And at least one Main chapter (real content).
+    let any_main = book.chapters.iter()
+        .any(|c| matches!(c.kind, cleader::epub::ChapterKind::Main));
+    assert!(any_main, "expected at least one Main chapter");
 }
