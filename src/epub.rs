@@ -69,7 +69,7 @@ pub struct Book {
     pub chapters: Vec<Chapter>,
 }
 
-/// Convert a chapter's XHTML body into Vec<Block>.
+/// Convert a chapter's XHTML body into a `Vec<Block>`.
 pub fn html_to_blocks(xhtml: &str) -> Vec<Block> {
     let doc = Html::parse_document(xhtml);
     let root = doc.root_element();
