@@ -52,6 +52,15 @@ fn opens_a_real_epub_and_extracts_chapters() {
     let book = Book::open(&path).expect("should open a known-good EPUB");
     assert!(!book.chapters.is_empty(), "must extract at least one chapter");
     assert!(!book.title.trim().is_empty(), "title must not be empty");
+    assert!(!book.id.as_str().is_empty(), "book id must not be empty");
+}
+
+#[test]
+fn opening_same_epub_twice_yields_same_id() {
+    let Some(path) = require_book(None) else { return; };
+    let book1 = Book::open(&path).unwrap();
+    let book2 = Book::open(&path).unwrap();
+    assert_eq!(book1.id, book2.id);
 }
 
 #[test]

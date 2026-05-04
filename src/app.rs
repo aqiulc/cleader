@@ -22,11 +22,23 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(book: Book, persistence: Persistence, viewport: (u16, u16)) -> Self {
+    pub fn new(book: Book, mut persistence: Persistence, viewport: (u16, u16)) -> Self {
         // Invariant: Book::open returns EpubError::NoChapters for empty books,
         // so reaching here with no chapters is a programmer error elsewhere.
         debug_assert!(!book.chapters.is_empty(), "App requires at least one chapter");
-        let key = book.path.to_string_lossy().into_owned();
+        let key = book.registry_key();
+
+        // Migration: if the new id-keyed entry doesn't exist, look for an
+        // entry under the v0.1 path-based key. Copy it under the new id so
+        // future flushes write to the right place. We don't remove the
+        // legacy entry — orphan cleanup is a future concern.
+        if persistence.get(&key).is_none() {
+            let legacy_key = book.path.to_string_lossy().into_owned();
+            if let Some(legacy_pos) = persistence.get(&legacy_key).cloned() {
+                persistence.upsert(key.clone(), legacy_pos);
+            }
+        }
+
         let (chapter_idx, line_offset) = match persistence.get(&key) {
             Some(p) if (p.chapter_idx as usize) < book.chapters.len() => {
                 (p.chapter_idx as usize, p.line_offset as usize)
@@ -130,7 +142,7 @@ impl App {
     }
 
     fn save(&mut self) {
-        let key = self.book.path.to_string_lossy().into_owned();
+        let key = self.book.registry_key();
         let pos = self.current_position();
         self.persistence.upsert(key, pos);
         match self.persistence.flush() {
@@ -260,7 +272,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::epub::{Block, Chapter, Span};
+    use crate::epub::{Block, BookId, Chapter, Span};
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -269,10 +281,12 @@ mod tests {
             .into_iter()
             .map(|blocks| Chapter { title: None, blocks, kind: ChapterKind::Main })
             .collect();
+        let path = PathBuf::from("/test/book.epub");
         Book {
+            id: BookId::from_bytes(path.to_string_lossy().as_bytes()),
             title: "T".into(),
             author: "A".into(),
-            path: PathBuf::from("/test/book.epub"),
+            path,
             chapters: chs,
         }
     }
@@ -296,10 +310,12 @@ mod tests {
             .into_iter()
             .map(|(blocks, kind)| Chapter { title: None, blocks, kind })
             .collect();
+        let path = PathBuf::from("/test/book.epub");
         Book {
+            id: BookId::from_bytes(path.to_string_lossy().as_bytes()),
             title: "T".into(),
             author: "A".into(),
-            path: PathBuf::from("/test/book.epub"),
+            path,
             chapters: chs,
         }
     }
@@ -613,12 +629,89 @@ mod tests {
             blocks.push(p("the quick brown fox jumps"));
         }
         let book = book_with_chapters(vec![blocks]);
+        let key = book.registry_key();
         let mut app = App::new(book, p_handle, (80, 24));
         app.handle(Action::PageNext);
-        // Re-open the persistence handle and verify the offset was saved.
+        // Re-open the persistence handle and verify the offset was saved
+        // under the id-derived registry key (not the legacy path key).
         let reopened = Persistence::open_at(path);
-        let pos = reopened.get("/test/book.epub").expect("position saved");
+        let pos = reopened.get(&key).expect("position saved");
         assert!(pos.line_offset > 0);
+    }
+
+    #[test]
+    fn new_app_migrates_from_legacy_path_key() {
+        // Simulate a v0.1 registry with the position keyed by absolute
+        // path. The new App must find and use it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let book_path = "/test/book.epub";
+        {
+            let mut p_handle = Persistence::open_at(path.clone());
+            p_handle.upsert(
+                book_path.into(), // <-- legacy path key
+                Position {
+                    title: "T".into(),
+                    author: "A".into(),
+                    chapter_idx: 1,
+                    line_offset: 0,
+                    last_read: Utc::now(),
+                },
+            );
+            p_handle.flush().unwrap();
+        }
+        let p_handle = Persistence::open_at(path);
+        let book = book_with_chapters(vec![vec![p("a")], vec![p("b")]]);
+        let app = App::new(book, p_handle, (80, 24));
+        assert_eq!(app.chapter_idx(), 1, "should restore from legacy path key");
+    }
+
+    #[test]
+    fn new_app_prefers_id_key_when_both_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let book = book_with_chapters(vec![vec![p("a")], vec![p("b")], vec![p("c")]]);
+        let id_key = book.registry_key();
+        let legacy_key = book.path.to_string_lossy().into_owned();
+        {
+            let mut p_handle = Persistence::open_at(path.clone());
+            // Old (stale) entry under legacy key — points to chapter 0.
+            p_handle.upsert(
+                legacy_key,
+                Position {
+                    title: "T".into(),
+                    author: "A".into(),
+                    chapter_idx: 0,
+                    line_offset: 0,
+                    last_read: Utc::now(),
+                },
+            );
+            // New (current) entry under id key — points to chapter 2.
+            p_handle.upsert(
+                id_key,
+                Position {
+                    title: "T".into(),
+                    author: "A".into(),
+                    chapter_idx: 2,
+                    line_offset: 0,
+                    last_read: Utc::now(),
+                },
+            );
+            p_handle.flush().unwrap();
+        }
+        let p_handle = Persistence::open_at(path);
+        let app = App::new(book, p_handle, (80, 24));
+        assert_eq!(app.chapter_idx(), 2, "should prefer the id-keyed entry");
+    }
+
+    #[test]
+    fn new_app_with_no_saved_entries_starts_at_zero() {
+        // Sanity: neither id-key nor legacy-key present → fresh start.
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("a")]]);
+        let app = App::new(book, p_handle, (80, 24));
+        assert_eq!(app.chapter_idx(), 0);
+        assert_eq!(app.line_offset(), 0);
     }
 
     #[test]

@@ -67,6 +67,44 @@ pub struct Book {
     pub author: String,
     pub path: PathBuf,
     pub chapters: Vec<Chapter>,
+    pub id: BookId,
+}
+
+/// Stable identifier for a book, derived from its file contents.
+///
+/// SHA-256 of the EPUB bytes, hex-encoded. Survives moves, renames,
+/// and copies of the same file — the user's reading position follows
+/// the content, not the path. Two distinct files with the same content
+/// (e.g. an EPUB you re-downloaded) get the same id; a re-encoded
+/// version of the same book is technically a different file and gets
+/// a different id, which is the correct conservative behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BookId(String);
+
+impl BookId {
+    /// Compute the id from raw EPUB bytes. Public so tests and future
+    /// callers (e.g. a v2 library scanner that streams from a directory)
+    /// can construct one without going through `Book::open`.
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(bytes);
+        let mut hex = String::with_capacity(64);
+        for byte in hash {
+            use std::fmt::Write;
+            let _ = write!(hex, "{byte:02x}");
+        }
+        Self(hex)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for BookId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Convert a chapter's XHTML body into a `Vec<Block>`.
@@ -375,11 +413,22 @@ fn classify(blocks: &[Block]) -> ChapterKind {
 }
 
 impl Book {
+    /// The string form of the Book's id, suitable for use as a
+    /// `Persistence` registry key. Single-source-of-truth — callers
+    /// must not construct registry keys themselves.
+    pub fn registry_key(&self) -> String {
+        self.id.to_string()
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, EpubError> {
         let path = path.as_ref();
         if !path.exists() {
             return Err(EpubError::NotFound(path.to_path_buf()));
         }
+
+        let bytes = std::fs::read(path)
+            .map_err(|e| EpubError::Malformed { reason: e.to_string() })?;
+        let id = BookId::from_bytes(&bytes);
 
         let mut doc = EpubDoc::new(path)
             .map_err(|e| EpubError::Malformed { reason: e.to_string() })?;
@@ -455,6 +504,7 @@ impl Book {
             author,
             path: path.to_path_buf(),
             chapters,
+            id,
         })
     }
 }
@@ -839,6 +889,34 @@ mod tests {
         </table></body></html>";
         let blocks = html_to_blocks(html);
         assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn book_id_is_deterministic() {
+        let bytes = b"some test bytes";
+        let id1 = BookId::from_bytes(bytes);
+        let id2 = BookId::from_bytes(bytes);
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn book_id_distinguishes_different_inputs() {
+        let id1 = BookId::from_bytes(b"foo");
+        let id2 = BookId::from_bytes(b"bar");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn book_id_is_64_hex_chars() {
+        let id = BookId::from_bytes(b"anything");
+        assert_eq!(id.as_str().len(), 64);
+        assert!(id.as_str().chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn book_id_display_matches_as_str() {
+        let id = BookId::from_bytes(b"x");
+        assert_eq!(format!("{id}"), id.as_str());
     }
 
     #[test]
