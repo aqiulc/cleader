@@ -292,17 +292,52 @@ fn collect_toc(toc: &[NavPoint], out: &mut HashMap<PathBuf, String>) {
     }
 }
 
-/// Strip a `#fragment` suffix from a TOC content path.
+/// Normalize a TOC content path so it can be matched against spine paths.
 ///
-/// The NCX format permits `chapter1.xhtml#section-2` to deep-link into a
-/// chapter. The spine never carries fragments — only resource paths — so
-/// we drop them before lookup. No-op when the path has no `#`.
+/// Two transformations:
+/// 1. Strip any `#fragment` suffix (NCX entries may deep-link via
+///    `chapter1.xhtml#section-2`; the spine never carries fragments).
+/// 2. Percent-decode the remaining path. Some converters (notably
+///    Calibre on default settings) emit `Chapter%201.xhtml` in the NCX
+///    while the spine lists `Chapter 1.xhtml`. Without decoding the
+///    chapter would silently fail to match and disappear from the
+///    book's chapter list.
+///
+/// Order matters: strip the real `#` before decoding, so an encoded
+/// `%23` in the path doesn't get mistaken for a fragment marker.
 fn strip_fragment(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
-    match s.find('#') {
-        Some(idx) => PathBuf::from(&s[..idx]),
-        None => p.to_path_buf(),
+    let without_fragment = match s.find('#') {
+        Some(idx) => &s[..idx],
+        None => &s,
+    };
+    PathBuf::from(percent_decode(without_fragment))
+}
+
+/// Percent-decode an ASCII path string. Unrecognized `%XX` sequences
+/// (non-hex digits, truncated at end-of-string) are passed through
+/// verbatim — better to over-keep than to silently drop bytes.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(hex) = hex {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
     }
+    // If the decoded bytes aren't valid UTF-8, fall back to the raw
+    // input. NCX paths are virtually always UTF-8 in practice.
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 /// Classify a chapter as Main (real prose) or FrontMatter (image-only).
@@ -433,6 +468,53 @@ mod tests {
         assert_eq!(Span::plain("a").style, SpanStyle::Plain);
         assert_eq!(Span::bold("a").style, SpanStyle::Bold);
         assert_eq!(Span::italic("a").style, SpanStyle::Italic);
+    }
+
+    #[test]
+    fn strip_fragment_removes_anchor_suffix() {
+        let p = strip_fragment(Path::new("chapter1.xhtml#section-2"));
+        assert_eq!(p, PathBuf::from("chapter1.xhtml"));
+    }
+
+    #[test]
+    fn strip_fragment_passes_through_unfragmented_paths() {
+        let p = strip_fragment(Path::new("chapter1.xhtml"));
+        assert_eq!(p, PathBuf::from("chapter1.xhtml"));
+    }
+
+    #[test]
+    fn strip_fragment_decodes_percent_encoded_spaces() {
+        // Calibre default conversion produces this pattern: NCX has
+        // "Chapter%201.xhtml" while the spine carries the literal-space
+        // "Chapter 1.xhtml". Without decoding the chapter is silently
+        // dropped from book.chapters.
+        let p = strip_fragment(Path::new("Chapter%201.xhtml"));
+        assert_eq!(p, PathBuf::from("Chapter 1.xhtml"));
+    }
+
+    #[test]
+    fn strip_fragment_strips_then_decodes() {
+        // Order matters: an encoded %23 (the literal '#' character) in
+        // the path must NOT be mistaken for a fragment marker. Strip
+        // the real # first, then decode.
+        let p = strip_fragment(Path::new("foo%23bar.xhtml#anchor"));
+        assert_eq!(p, PathBuf::from("foo#bar.xhtml"));
+    }
+
+    #[test]
+    fn percent_decode_passes_through_malformed_sequences() {
+        // % followed by non-hex or truncated at EOS should be kept
+        // verbatim, not silently dropped.
+        assert_eq!(percent_decode("100%done"), "100%done");
+        assert_eq!(percent_decode("trailing%"), "trailing%");
+        assert_eq!(percent_decode("trailing%2"), "trailing%2");
+    }
+
+    #[test]
+    fn percent_decode_handles_uppercase_and_lowercase_hex() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("a%2Fb"), "a/b");
+        assert_eq!(percent_decode("a%2fb"), "a/b");
     }
 
     #[test]
