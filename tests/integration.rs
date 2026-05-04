@@ -49,3 +49,36 @@ fn missing_path_returns_not_found_error() {
     let result = Book::open("/no/such/file.epub");
     assert!(result.is_err());
 }
+
+#[test]
+fn toc_filtering_drops_front_matter() {
+    // Threshold's spine includes a cover that produces non-empty blocks
+    // (alt text rendered as "[image: ...]"). Without TOC filtering it
+    // shows as Chapter 1; with filtering it should be excluded. We pin
+    // this against the Threshold fixture specifically — first_test_book()
+    // could pick a different EPUB depending on what's in books/.
+    let path = PathBuf::from("books/Threshold (Will Wight).epub");
+    if !path.exists() {
+        // Skip if the user removed this specific fixture.
+        return;
+    }
+    let book = Book::open(&path).unwrap();
+    // The very first chapter should not be the bare cover image. A real
+    // chapter has actual paragraph text (more than one image-only block).
+    let first = &book.chapters[0];
+    let has_real_text = first.blocks.iter().any(|b| match b {
+        Block::Paragraph { spans } => {
+            spans.len() > 1
+                || spans
+                    .first()
+                    .map(|s| !s.text.starts_with("[image:"))
+                    .unwrap_or(false)
+        }
+        Block::Heading { .. } => true,
+        Block::Blank => false,
+    });
+    assert!(
+        has_real_text,
+        "first chapter should have real text, not just an image placeholder"
+    );
+}

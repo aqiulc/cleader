@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use scraper::{ElementRef, Html, Node};
 
 use crate::error::EpubError;
-use ::epub::doc::EpubDoc;
+use ::epub::doc::{EpubDoc, NavPoint};
 
 /// Inline styling for a span of text.
 ///
@@ -265,6 +266,56 @@ fn collapse_whitespace(s: &str) -> String {
     out
 }
 
+/// Recursively collect TOC entries into a path-to-label map.
+///
+/// Walks NCX `navPoint` (or EPUB3 `nav doc`) trees, normalizing each
+/// content path so it can be matched against the spine's resource paths.
+/// The first label seen for a given path wins, which means top-level
+/// labels take precedence over duplicate nested entries (rare, but it
+/// happens with deeply-nested TOCs that re-link the parent's anchor).
+fn collect_toc(toc: &[NavPoint], out: &mut HashMap<PathBuf, String>) {
+    for point in toc {
+        let path = strip_fragment(&point.content);
+        out.entry(path).or_insert_with(|| point.label.clone());
+        collect_toc(&point.children, out);
+    }
+}
+
+/// Strip a `#fragment` suffix from a TOC content path.
+///
+/// The NCX format permits `chapter1.xhtml#section-2` to deep-link into a
+/// chapter. The spine never carries fragments — only resource paths — so
+/// we drop them before lookup. No-op when the path has no `#`.
+fn strip_fragment(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.find('#') {
+        Some(idx) => PathBuf::from(&s[..idx]),
+        None => p.to_path_buf(),
+    }
+}
+
+/// Return true if the only meaningful content of `blocks` is a single
+/// `[image: ...]` placeholder paragraph.
+///
+/// This is the cover-as-chapter pattern: an XHTML file whose body is just
+/// `<img alt="…">` and which we render as a single `[image: …]` paragraph.
+/// Even when the EPUB's TOC explicitly references such a page, treating it
+/// as a chapter inflates the chapter count by 1 (the user-reported bug).
+/// `Block::Blank` filler is ignored when counting.
+fn is_image_only_chapter(blocks: &[Block]) -> bool {
+    let non_blank: Vec<&Block> =
+        blocks.iter().filter(|b| !matches!(b, Block::Blank)).collect();
+    if non_blank.len() != 1 {
+        return false;
+    }
+    match non_blank[0] {
+        Block::Paragraph { spans } => {
+            spans.len() == 1 && spans[0].text.starts_with("[image:")
+        }
+        _ => false,
+    }
+}
+
 impl Book {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, EpubError> {
         let path = path.as_ref();
@@ -288,21 +339,53 @@ impl Book {
             .map(|m| m.value.clone())
             .unwrap_or_else(|| "Unknown".into());
 
-        let mut chapters = Vec::new();
+        // First pass: collect every non-empty spine item as (path, blocks).
+        // Silent skip on get_current_str() == None: a single corrupt spine
+        // item shouldn't kill a 30-chapter book.
+        let mut all: Vec<(PathBuf, Vec<Block>)> = Vec::new();
         loop {
-            // Silent skip on get_current_str() == None: a single corrupt
-            // spine item shouldn't kill a 30-chapter book.
+            let current_path = doc.get_current_path();
             if let Some((content, _mime)) = doc.get_current_str() {
                 let blocks = html_to_blocks(&content);
                 if !blocks.is_empty() {
-                    // TODO(v2): populate Chapter::title from <h1>/<title> or NCX TOC.
-                    chapters.push(Chapter { title: None, blocks });
+                    if let Some(p) = current_path {
+                        all.push((p, blocks));
+                    }
                 }
             }
             if !doc.go_next() {
                 break;
             }
         }
+
+        // Second pass: filter via the TOC. Front-matter (cover, title page,
+        // copyright, etc.) is in the spine but typically NOT referenced by
+        // the TOC, so this drops it without us having to hard-code names.
+        // When the TOC is empty (rare hand-rolled EPUBs lack one), keep all
+        // spine items so we still load the book.
+        let mut toc_labels: HashMap<PathBuf, String> = HashMap::new();
+        collect_toc(&doc.toc, &mut toc_labels);
+
+        let chapters: Vec<Chapter> = if toc_labels.is_empty() {
+            all.into_iter()
+                .map(|(_, blocks)| Chapter { title: None, blocks })
+                .collect()
+        } else {
+            all.into_iter()
+                .filter_map(|(p, blocks)| {
+                    toc_labels
+                        .get(&p)
+                        .map(|label| Chapter { title: Some(label.clone()), blocks })
+                })
+                // Even when TOC-referenced, a "chapter" whose entire body is
+                // a single [image: ...] placeholder is a cover/title-image
+                // wrapper page, not real prose. (Threshold's TOC explicitly
+                // lists its cover; the user-reported bug is that the cover
+                // shows as Ch 1.) Drop those — the image was alt text, not
+                // narrative.
+                .filter(|c| !is_image_only_chapter(&c.blocks))
+                .collect()
+        };
 
         if chapters.is_empty() {
             return Err(EpubError::NoChapters);
