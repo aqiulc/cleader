@@ -90,6 +90,7 @@ fn event_loop(
                         chapter_display: app.main_chapter_position(),
                         page: app.page(),
                         total_pages: app.total_pages(),
+                        warning: app.save_error(),
                         width: area.width,
                     },
                 },

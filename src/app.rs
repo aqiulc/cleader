@@ -13,6 +13,12 @@ pub struct App {
     viewport_size: (u16, u16),
     persistence: Persistence,
     should_quit: bool,
+    /// Last persistence-flush error, displayed in the status bar until
+    /// a subsequent flush succeeds. `None` = no warning to show. Replaces
+    /// the previous `eprintln!`-into-alt-screen behavior, where the
+    /// warning was eaten by the alternate screen and the user had no
+    /// indication that their position wasn't being saved.
+    save_error: Option<String>,
 }
 
 impl App {
@@ -40,6 +46,7 @@ impl App {
             viewport_size: viewport,
             persistence,
             should_quit: false,
+            save_error: None,
         }
     }
 
@@ -126,9 +133,23 @@ impl App {
         let key = self.book.path.to_string_lossy().into_owned();
         let pos = self.current_position();
         self.persistence.upsert(key, pos);
-        if let Err(e) = self.persistence.flush() {
-            eprintln!("cleader: warning: could not save position ({e})");
+        match self.persistence.flush() {
+            Ok(()) => {
+                // Successful flush clears any prior warning so the user
+                // knows recent saves are getting through.
+                self.save_error = None;
+            }
+            Err(e) => {
+                self.save_error = Some(format!("save failed: {e}"));
+            }
         }
+    }
+
+    /// Most recent save failure, if any. Cleared by the next successful
+    /// flush. The renderer surfaces this in the status bar; see
+    /// `eprintln!` was the v0.1 behavior, eaten by the alternate screen.
+    pub fn save_error(&self) -> Option<&str> {
+        self.save_error.as_deref()
     }
 
     pub fn handle(&mut self, action: Action) {
@@ -598,5 +619,26 @@ mod tests {
         let reopened = Persistence::open_at(path);
         let pos = reopened.get("/test/book.epub").expect("position saved");
         assert!(pos.line_offset > 0);
+    }
+
+    #[test]
+    fn save_error_starts_none_and_stays_none_on_successful_flush() {
+        // The negative path (forced flush failure) is hard to test
+        // portably without mocking the filesystem. Pin the positive
+        // contract: a fresh App reports no save_error, and a successful
+        // PageNext (which flushes) keeps it None.
+        let (p_handle, _dir) = fresh_persistence();
+        let mut blocks = Vec::new();
+        for _ in 0..30 {
+            blocks.push(p("the quick brown fox"));
+        }
+        let book = book_with_chapters(vec![blocks]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        assert!(app.save_error().is_none(), "fresh App has no save error");
+        app.handle(Action::PageNext);
+        assert!(
+            app.save_error().is_none(),
+            "successful flush should leave save_error as None"
+        );
     }
 }

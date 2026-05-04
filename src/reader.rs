@@ -145,6 +145,11 @@ pub struct StatusInput<'a> {
     pub chapter_display: Option<(usize, usize)>,
     pub page: usize,
     pub total_pages: usize,
+    /// Most recent persistence-flush failure, if any. Replaces the
+    /// `q quit` hint on the right side of the status bar so the user
+    /// sees that their position isn't being saved. Cleared by the App
+    /// on the next successful flush.
+    pub warning: Option<&'a str>,
     pub width: u16,
 }
 
@@ -161,7 +166,10 @@ pub fn build_status_bar(s: StatusInput<'_>) -> String {
         ),
         None => format!(" ── Page {}/{} ─ ", s.page, s.total_pages),
     };
-    let right = format!(" {STATUS_RIGHT} ");
+    // Replace the `q quit` hint with the warning when present so the
+    // failure is visible without crowding the bar with a new segment.
+    let right_text = s.warning.unwrap_or(STATUS_RIGHT);
+    let right = format!(" {right_text} ");
 
     // Reserve space (in unicode columns, NOT bytes) for: leading `── ` (3),
     // progress, right. Trailing dashes are filled by the pad loop. Using
@@ -478,6 +486,7 @@ mod tests {
             chapter_display: Some((4, 22)),
             page: 18,
             total_pages: 247,
+            warning: None,
             width: 80,
         });
         assert_eq!(UnicodeWidthStr::width(bar.as_str()), 80);
@@ -494,6 +503,7 @@ mod tests {
             chapter_display: Some((1, 1)),
             page: 1,
             total_pages: 1,
+            warning: None,
             width: 50,
         });
         assert!(bar.contains("…"));
@@ -511,6 +521,7 @@ mod tests {
             chapter_display: Some((1, 1)),
             page: 1,
             total_pages: 1,
+            warning: None,
             width: 3,
         });
         // Just must not panic.
@@ -524,11 +535,33 @@ mod tests {
             chapter_display: None,
             page: 1,
             total_pages: 1,
+            warning: None,
             width: 60,
         });
         assert!(!bar.contains("Ch "), "front matter should not show chapter number; got {bar:?}");
         assert!(bar.contains("Page 1/1"));
         assert_eq!(UnicodeWidthStr::width(bar.as_str()), 60);
+    }
+
+    #[test]
+    fn status_bar_replaces_q_quit_with_warning_when_present() {
+        let bar = build_status_bar(StatusInput {
+            title: "Book",
+            chapter_display: Some((1, 1)),
+            page: 1,
+            total_pages: 1,
+            warning: Some("save failed: read-only filesystem"),
+            width: 80,
+        });
+        assert!(
+            bar.contains("save failed"),
+            "warning should appear in the status bar; got {bar:?}"
+        );
+        assert!(
+            !bar.contains("q quit"),
+            "warning replaces q quit; got {bar:?}"
+        );
+        assert_eq!(UnicodeWidthStr::width(bar.as_str()), 80);
     }
 
     #[test]
