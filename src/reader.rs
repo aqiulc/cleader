@@ -410,7 +410,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     }
     lines.push(Line::default());
     lines.push(Line::from(vec![TuiSpan::styled(
-        "  Press ? or Esc to close",
+        "  Press ? Esc q Ctrl+C to close",
         Style::default().add_modifier(Modifier::DIM),
     )]));
 
@@ -428,11 +428,11 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         .max()
         .unwrap_or(0);
     let modal_width = ((max_content_width as u16).saturating_add(4))
-        .min(area.width)
-        .max(20);
+        .max(20)
+        .min(area.width);
     let modal_height = ((lines.len() as u16).saturating_add(2))
-        .min(area.height)
-        .max(5);
+        .max(5)
+        .min(area.height);
 
     // Center within the area.
     let x = area.x + area.width.saturating_sub(modal_width) / 2;
@@ -839,5 +839,63 @@ mod tests {
     fn body_text_width_floors_at_20() {
         // Tiny terminal.
         assert_eq!(body_text_width(10), 20);
+    }
+
+    #[test]
+    fn help_overlay_does_not_panic_on_narrow_terminal() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // 4×4 — pathologically tiny.
+        let backend = TestBackend::new(4, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let input = RenderInput {
+                    wrapped: &[],
+                    line_offset: 0,
+                    status: StatusInput {
+                        title: "x",
+                        chapter_display: None,
+                        page: 1,
+                        total_pages: 1,
+                        warning: None,
+                        width: area.width,
+                    },
+                    show_help: true,
+                };
+                render(frame, area, input);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn help_overlay_does_not_panic_on_short_terminal() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // 10×3 — typical of a small tmux pane.
+        let backend = TestBackend::new(10, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let input = RenderInput {
+                    wrapped: &[],
+                    line_offset: 0,
+                    status: StatusInput {
+                        title: "x",
+                        chapter_display: None,
+                        page: 1,
+                        total_pages: 1,
+                        warning: None,
+                        width: area.width,
+                    },
+                    show_help: true,
+                };
+                render(frame, area, input);
+            })
+            .unwrap();
     }
 }
