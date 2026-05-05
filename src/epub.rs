@@ -87,10 +87,10 @@ impl BookId {
     /// can construct one without going through `Book::open`.
     pub fn from_bytes(bytes: &[u8]) -> Self {
         use sha2::{Digest, Sha256};
+        use std::fmt::Write;
         let hash = Sha256::digest(bytes);
         let mut hex = String::with_capacity(64);
         for byte in hash {
-            use std::fmt::Write;
             let _ = write!(hex, "{byte:02x}");
         }
         Self(hex)
@@ -426,8 +426,7 @@ impl Book {
             return Err(EpubError::NotFound(path.to_path_buf()));
         }
 
-        let bytes = std::fs::read(path)
-            .map_err(|e| EpubError::Malformed { reason: e.to_string() })?;
+        let bytes = std::fs::read(path)?;
         let id = BookId::from_bytes(&bytes);
 
         let mut doc = EpubDoc::new(path)

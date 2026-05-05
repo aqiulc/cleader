@@ -32,10 +32,17 @@ impl App {
         // entry under the v0.1 path-based key. Copy it under the new id so
         // future flushes write to the right place. We don't remove the
         // legacy entry — orphan cleanup is a future concern.
+        let mut migration_error: Option<String> = None;
         if persistence.get(&key).is_none() {
             let legacy_key = book.path.to_string_lossy().into_owned();
             if let Some(legacy_pos) = persistence.get(&legacy_key).cloned() {
                 persistence.upsert(key.clone(), legacy_pos);
+                // Make the migration durable now, independent of whether the
+                // user later quits via 'q' (which would flush) or kills the
+                // process abruptly.
+                if let Err(e) = persistence.flush() {
+                    migration_error = Some(format!("save failed: {e}"));
+                }
             }
         }
 
@@ -58,7 +65,7 @@ impl App {
             viewport_size: viewport,
             persistence,
             should_quit: false,
-            save_error: None,
+            save_error: migration_error,
         }
     }
 
@@ -642,14 +649,15 @@ mod tests {
     #[test]
     fn new_app_migrates_from_legacy_path_key() {
         // Simulate a v0.1 registry with the position keyed by absolute
-        // path. The new App must find and use it.
+        // path. The new App must find and use it. The legacy entry
+        // remains on disk (no remove() yet — future cleanup task).
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("registry.json");
         let book_path = "/test/book.epub";
         {
             let mut p_handle = Persistence::open_at(path.clone());
             p_handle.upsert(
-                book_path.into(), // <-- legacy path key
+                book_path.into(),
                 Position {
                     title: "T".into(),
                     author: "A".into(),
@@ -660,10 +668,25 @@ mod tests {
             );
             p_handle.flush().unwrap();
         }
-        let p_handle = Persistence::open_at(path);
+        let p_handle = Persistence::open_at(path.clone());
         let book = book_with_chapters(vec![vec![p("a")], vec![p("b")]]);
+        let new_id_key = book.registry_key();
+        let legacy_key = book.path.to_string_lossy().into_owned();
         let app = App::new(book, p_handle, (80, 24));
         assert_eq!(app.chapter_idx(), 1, "should restore from legacy path key");
+
+        // Migration is durable: re-open the registry and confirm both
+        // the new id-key (copied during migration) and the legacy
+        // path-key (left in place) are present.
+        let reopened = Persistence::open_at(path);
+        assert!(
+            reopened.get(&new_id_key).is_some(),
+            "id-key entry should be on disk after migration"
+        );
+        assert!(
+            reopened.get(&legacy_key).is_some(),
+            "legacy path-key entry should remain (orphan cleanup is a future task)"
+        );
     }
 
     #[test]

@@ -9,6 +9,8 @@ pub enum EpubError {
     Malformed { reason: String },
     #[error("this EPUB has no readable chapters")]
     NoChapters,
+    #[error("failed to read EPUB: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, Error)]
@@ -47,5 +49,12 @@ mod tests {
     fn epub_error_no_chapters_message() {
         let err = EpubError::NoChapters;
         assert_eq!(err.to_string(), "this EPUB has no readable chapters");
+    }
+
+    #[test]
+    fn epub_error_io_message() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err: EpubError = io_err.into();
+        assert!(err.to_string().starts_with("failed to read EPUB:"));
     }
 }
