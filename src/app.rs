@@ -1,7 +1,7 @@
 use crate::epub::{Book, ChapterKind};
 use crate::input::Action;
 use crate::persistence::{Persistence, Position};
-use crate::reader::{body_text_width, wrap_chapter};
+use crate::reader::{WrappedChapter, body_text_width, wrap_chapter};
 use chrono::Utc;
 use ratatui::text::Line;
 
@@ -9,7 +9,7 @@ pub struct App {
     book: Book,
     chapter_idx: usize,
     line_offset: usize,
-    wrapped: Vec<Line<'static>>,
+    wrapped: WrappedChapter,
     viewport_size: (u16, u16),
     persistence: Persistence,
     should_quit: bool,
@@ -82,7 +82,20 @@ impl App {
     }
 
     pub fn wrapped(&self) -> &[Line<'static>] {
-        &self.wrapped
+        &self.wrapped.lines
+    }
+
+    /// Test-only accessor: source-char offset of the currently-top
+    /// wrapped line. Used to verify resize preserves the user's
+    /// position. Public via doc(hidden) so integration tests can
+    /// reach it; not part of the documented public API.
+    #[doc(hidden)]
+    pub fn wrapped_source_offset_at_top(&self) -> usize {
+        self.wrapped
+            .source_offsets
+            .get(self.line_offset)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn viewport_size(&self) -> (u16, u16) {
@@ -265,12 +278,22 @@ impl App {
         let width_changed = w != self.viewport_size.0;
         self.viewport_size = (w, h);
         if width_changed {
+            // Save the source-char offset of the currently-visible top line
+            // so we can land on the same content after rewrap.
+            let target_source = self
+                .wrapped
+                .source_offsets
+                .get(self.line_offset)
+                .copied()
+                .unwrap_or(0);
             self.wrapped = wrap_chapter(
                 &self.book.chapters[self.chapter_idx].blocks,
                 body_text_width(self.viewport_size.0),
             );
             self.line_offset = self
-                .line_offset
+                .wrapped
+                .find_line_for_source(target_source)
+                .unwrap_or(0)
                 .min(self.wrapped.len().saturating_sub(1));
         }
     }
@@ -578,6 +601,49 @@ mod tests {
         let lines_at_40 = app.wrapped().len();
         assert!(lines_at_40 >= lines_at_80, "narrower terminal should wrap to more lines");
         assert_eq!(app.viewport_size(), (40, 24));
+    }
+
+    #[test]
+    fn resize_preserves_viewport_source_position() {
+        // User is mid-chapter at width 80. Resize to width 40 narrows
+        // the wrap; their viewport's top line should still correspond
+        // to the same source position (the same paragraph and roughly
+        // the same point within it).
+        let (p_handle, _dir) = fresh_persistence();
+        // Make a chapter with enough content to span many wrapped lines.
+        let mut blocks = Vec::new();
+        for _ in 0..30 {
+            blocks.push(p(
+                "the quick brown fox jumps over the lazy dog repeatedly today and tomorrow"
+            ));
+        }
+        let book = book_with_chapters(vec![blocks]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        // Scroll some distance from the top so the viewport isn't at line 0.
+        for _ in 0..15 {
+            app.handle(Action::PageNext);
+        }
+        let pre_source = app.wrapped_source_offset_at_top();
+
+        // Resize to a narrower terminal.
+        app.handle(Action::Resize(40, 24));
+
+        let post_source = app.wrapped_source_offset_at_top();
+        // The new top-line should correspond to a source position
+        // at-or-before the saved one (and as close to it as possible).
+        assert!(
+            post_source <= pre_source,
+            "post-resize top should be at or before saved source ({post_source} > {pre_source})"
+        );
+        // It should be reasonably close — within one wrapped paragraph's
+        // worth of source chars (a paragraph here is ~75 chars). If the
+        // implementation snapped all the way to the start of the chapter
+        // (e.g. always returning 0), this would fail.
+        assert!(
+            pre_source - post_source < 100,
+            "post-resize top drifted too far ({} chars before)",
+            pre_source - post_source
+        );
     }
 
     #[test]

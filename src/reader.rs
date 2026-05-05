@@ -8,76 +8,160 @@ use unicode_width::UnicodeWidthStr;
 
 const HEADING_COLOR: Color = Color::Cyan;
 
-/// Wrap a chapter's blocks into a flat list of styled lines for a given width.
-/// Pure function: same input always produces same output.
+/// Output of `wrap_chapter`: parallel arrays of rendered lines and the
+/// source-character offsets where each line begins. Offsets are
+/// monotonic non-decreasing (wrap walks the source forward), so a
+/// binary search recovers the new line for a given source offset
+/// after a re-wrap. Used by `App::resize` to preserve the user's
+/// viewport position when the terminal width changes.
+#[derive(Debug, Default, Clone)]
+pub struct WrappedChapter {
+    pub lines: Vec<Line<'static>>,
+    pub source_offsets: Vec<usize>,
+}
+
+impl WrappedChapter {
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Find the line at the given source offset, or the closest line
+    /// that starts at-or-before it. Returns `None` if there are no
+    /// lines (empty chapter).
+    pub fn find_line_for_source(&self, target: usize) -> Option<usize> {
+        if self.source_offsets.is_empty() {
+            return None;
+        }
+        // partition_point gives us the first index whose offset is > target.
+        // We want the largest index whose offset is <= target.
+        let after = self.source_offsets.partition_point(|&off| off <= target);
+        Some(after.saturating_sub(1))
+    }
+}
+
+/// Wrap a chapter's blocks into a flat list of styled lines for a given width,
+/// alongside the source-character offset where each line begins. Pure function:
+/// same input always produces same output.
 ///
 /// Words longer than `width` are emitted on their own line and exceed `width`.
 /// v1 deliberately does not break mid-word — graphemes, hyphenation, CJK, and
 /// emoji ZWJ sequences make mid-word splitting a tar pit.
-pub fn wrap_chapter(blocks: &[Block], width: u16) -> Vec<Line<'static>> {
-    let width = width as usize;
-    let mut out = Vec::new();
+pub fn wrap_chapter(blocks: &[Block], width: u16) -> WrappedChapter {
+    let width_us = width as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut source_offsets: Vec<usize> = Vec::new();
+    let mut chapter_offset: usize = 0;
+
     for block in blocks {
         match block {
-            Block::Blank => out.push(Line::default()),
+            Block::Blank => {
+                lines.push(Line::default());
+                source_offsets.push(chapter_offset);
+                // Blank consumes no source chars.
+            }
             Block::Paragraph { spans } => {
-                wrap_spans(spans, width, false, &mut out);
-                out.push(Line::default());
+                wrap_spans(
+                    spans,
+                    width_us,
+                    false,
+                    chapter_offset,
+                    &mut lines,
+                    &mut source_offsets,
+                );
+                let para_chars: usize = spans.iter().map(|s| s.text.chars().count()).sum();
+                chapter_offset += para_chars;
+                // Trailing blank — same offset as where paragraph ends.
+                lines.push(Line::default());
+                source_offsets.push(chapter_offset);
             }
             Block::Heading { spans, .. } => {
-                wrap_spans(spans, width, true, &mut out);
-                out.push(Line::default());
+                wrap_spans(
+                    spans,
+                    width_us,
+                    true,
+                    chapter_offset,
+                    &mut lines,
+                    &mut source_offsets,
+                );
+                let head_chars: usize = spans.iter().map(|s| s.text.chars().count()).sum();
+                chapter_offset += head_chars;
+                lines.push(Line::default());
+                source_offsets.push(chapter_offset);
             }
         }
     }
+
     // Drop the trailing blank that the last block added — keeps the
     // chapter from ending with a vestigial empty line below the last
     // paragraph.
-    if let Some(last) = out.last() {
+    if let Some(last) = lines.last() {
         if last.spans.is_empty() {
-            out.pop();
+            lines.pop();
+            source_offsets.pop();
         }
     }
-    out
+
+    WrappedChapter { lines, source_offsets }
 }
 
 fn wrap_spans(
     spans: &[Span],
     width: usize,
     heading: bool,
-    out: &mut Vec<Line<'static>>,
+    block_start_offset: usize,
+    out_lines: &mut Vec<Line<'static>>,
+    out_offsets: &mut Vec<usize>,
 ) {
     let width = width.max(1);
     let mut current: Vec<TuiSpan<'static>> = Vec::new();
     let mut current_width: usize = 0;
+    // Source-char position relative to the start of this block.
+    let mut chars_consumed: usize = 0;
+    // Snapshot of chars_consumed at the moment the current line started.
+    let mut current_line_start_offset: usize = chars_consumed;
 
     for span in spans {
         let style = tui_style(span.style, heading);
         for token in tokens(&span.text) {
             match token {
                 Token::Word(w) => {
+                    let w_chars = w.chars().count();
                     let w_width = UnicodeWidthStr::width(w);
                     let need_space = !current.is_empty() && current_width > 0;
                     let extra = if need_space { 1 } else { 0 };
                     if current_width + extra + w_width > width && !current.is_empty() {
-                        out.push(Line::from(std::mem::take(&mut current)));
+                        // Flush current line; record its offset.
+                        out_lines.push(Line::from(std::mem::take(&mut current)));
+                        out_offsets.push(block_start_offset + current_line_start_offset);
                         current_width = 0;
+                        current_line_start_offset = chars_consumed;
                     }
                     if !current.is_empty() && current_width > 0 {
                         push_span(&mut current, " ".to_string(), style);
                         current_width += 1;
+                        // The space we inserted is a synthetic separator, not in the
+                        // source — don't bump chars_consumed for it.
                     }
                     push_span(&mut current, w.to_string(), style);
                     current_width += w_width;
+                    chars_consumed += w_chars;
                 }
                 Token::Whitespace => {
-                    // Word-boundary marker; the next word handles spacing.
+                    // Inter-word whitespace in the source DOES contribute one
+                    // char to the cursor so the next line's offset reflects
+                    // "after the space".
+                    chars_consumed += 1;
                 }
             }
         }
     }
     if !current.is_empty() {
-        out.push(Line::from(current));
+        out_lines.push(Line::from(current));
+        out_offsets.push(block_start_offset + current_line_start_offset);
     }
 }
 
@@ -308,7 +392,7 @@ mod tests {
     #[test]
     fn short_paragraph_fits_one_line_no_trailing_blank() {
         let blocks = vec![pgraph("hello world")];
-        let lines = wrap_chapter(&blocks, 80);
+        let lines = wrap_chapter(&blocks, 80).lines;
         assert_eq!(lines.len(), 1);
         assert_eq!(line_text(&lines[0]), "hello world");
     }
@@ -316,7 +400,7 @@ mod tests {
     #[test]
     fn long_paragraph_wraps_at_word_boundary() {
         let blocks = vec![pgraph("the quick brown fox jumps over the lazy dog")];
-        let lines = wrap_chapter(&blocks, 20);
+        let lines = wrap_chapter(&blocks, 20).lines;
         // Lines must each be <= 20 columns.
         for line in &lines {
             let w = UnicodeWidthStr::width(line_text(line).as_str());
@@ -337,22 +421,22 @@ mod tests {
         // A chapter that's nothing but a Blank trims to nothing —
         // the trim treats Block::Blank's empty line the same as a
         // paragraph's trailing blank.
-        let lines = wrap_chapter(&[Block::Blank], 80);
-        assert!(lines.is_empty());
+        let wrapped = wrap_chapter(&[Block::Blank], 80);
+        assert!(wrapped.is_empty());
     }
 
     #[test]
     fn empty_chapter_emits_no_lines() {
-        let lines = wrap_chapter(&[], 80);
-        assert!(lines.is_empty());
+        let wrapped = wrap_chapter(&[], 80);
+        assert!(wrapped.is_empty());
     }
 
     #[test]
     fn very_narrow_width_does_not_panic() {
         let blocks = vec![pgraph("supercalifragilisticexpialidocious")];
-        let lines = wrap_chapter(&blocks, 1);
+        let wrapped = wrap_chapter(&blocks, 1);
         // The single long word becomes its own line (overflow accepted).
-        assert!(!lines.is_empty());
+        assert!(!wrapped.is_empty());
     }
 
     #[test]
@@ -361,7 +445,7 @@ mod tests {
             level: 1,
             spans: vec![Span::plain("Chapter One")],
         }];
-        let lines = wrap_chapter(&blocks, 80);
+        let lines = wrap_chapter(&blocks, 80).lines;
         // Heading line followed by no trailing blank (we trim) — so 1 line.
         assert_eq!(lines.len(), 1);
         let style = lines[0].spans[0].style;
@@ -376,7 +460,7 @@ mod tests {
         // Width=12 forces wrap. Without NBSP handling the wrap could split
         // between "Mr." and "Smith"; with it, "Mr.\u{00A0}Smith" is one
         // word and goes on its own line if needed.
-        let lines = wrap_chapter(&blocks, 12);
+        let lines = wrap_chapter(&blocks, 12).lines;
         for line in &lines {
             let text = line_text(line);
             // Each line either contains the FULL "Mr.\u{00A0}Smith"
@@ -400,7 +484,7 @@ mod tests {
     #[test]
     fn multi_block_chapter_has_no_trailing_blank() {
         let blocks = vec![pgraph("first"), pgraph("second")];
-        let lines = wrap_chapter(&blocks, 80);
+        let lines = wrap_chapter(&blocks, 80).lines;
         assert!(
             !lines.last().unwrap().spans.is_empty(),
             "last line should be the last paragraph's text, not a blank"
@@ -417,7 +501,7 @@ mod tests {
                 Span::plain("plain"),
             ],
         }];
-        let lines = wrap_chapter(&blocks, 80);
+        let lines = wrap_chapter(&blocks, 80).lines;
         // First (and only) content line should have multiple TuiSpans
         // because the bold one needs a different style.
         let styles = line_styles(&lines[0]);
@@ -430,7 +514,7 @@ mod tests {
     #[test]
     fn cjk_wide_chars_count_as_two_columns() {
         let blocks = vec![pgraph("漢字 漢字 漢字")];
-        let lines = wrap_chapter(&blocks, 6);
+        let lines = wrap_chapter(&blocks, 6).lines;
         // Each "漢字" is 4 columns; with a space they're 5; two pairs would
         // be 9 (4+1+4) — so each line should hold at most one "漢字" pair.
         for line in &lines {
@@ -444,7 +528,7 @@ mod tests {
         let blocks = vec![Block::Paragraph {
             spans: vec![Span::italic("hi")],
         }];
-        let lines = wrap_chapter(&blocks, 80);
+        let lines = wrap_chapter(&blocks, 80).lines;
         assert!(
             lines[0].spans[0].style.add_modifier.contains(Modifier::ITALIC),
             "italic span must keep ITALIC modifier"
@@ -460,7 +544,7 @@ mod tests {
                 Span::bold("bbb ccc ddd eee fff"),
             ],
         }];
-        let lines = wrap_chapter(&blocks, 12);
+        let lines = wrap_chapter(&blocks, 12).lines;
         // Find bold segments across all output lines; expect at least 2
         // distinct line positions where a bold span appears.
         let mut bold_lines = 0;
@@ -477,6 +561,49 @@ mod tests {
             bold_lines >= 2,
             "bold modifier must survive across wrap; bold appeared on {bold_lines} line(s)"
         );
+    }
+
+    #[test]
+    fn wrap_chapter_emits_offsets_parallel_to_lines() {
+        let blocks = vec![pgraph("alpha bravo charlie delta echo")];
+        let wrapped = wrap_chapter(&blocks, 12);
+        assert_eq!(wrapped.lines.len(), wrapped.source_offsets.len());
+    }
+
+    #[test]
+    fn wrap_chapter_offsets_are_monotonic_non_decreasing() {
+        let blocks = vec![
+            Block::Heading { level: 1, spans: vec![Span::plain("Chapter 1")] },
+            Block::Blank,
+            pgraph("First paragraph here."),
+            pgraph("Second paragraph follows."),
+        ];
+        let wrapped = wrap_chapter(&blocks, 20);
+        for window in wrapped.source_offsets.windows(2) {
+            assert!(
+                window[0] <= window[1],
+                "source offsets must be monotonic non-decreasing: {window:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn find_line_for_source_returns_at_or_before_match() {
+        let blocks = vec![pgraph("alpha bravo charlie delta echo foxtrot golf")];
+        let wrapped = wrap_chapter(&blocks, 12);
+        // Querying offset 0 always returns line 0.
+        assert_eq!(wrapped.find_line_for_source(0), Some(0));
+        // Querying a huge offset clamps to last line.
+        assert_eq!(
+            wrapped.find_line_for_source(99999),
+            Some(wrapped.lines.len() - 1)
+        );
+    }
+
+    #[test]
+    fn find_line_for_source_on_empty_chapter_returns_none() {
+        let wrapped = wrap_chapter(&[], 80);
+        assert_eq!(wrapped.find_line_for_source(0), None);
     }
 
     #[test]

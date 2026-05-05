@@ -160,13 +160,13 @@ fn wrap_pipeline_on_real_epub_respects_width() {
         .expect("at least one substantive Main chapter");
 
     let width = 80u16;
-    let lines = cleader::reader::wrap_chapter(&chapter.blocks, width);
-    assert!(!lines.is_empty(), "wrap of substantive chapter should produce lines");
+    let wrapped = cleader::reader::wrap_chapter(&chapter.blocks, width);
+    assert!(!wrapped.is_empty(), "wrap of substantive chapter should produce lines");
 
     // Every line must fit within the requested width (allowing an overflow
     // only for words that are themselves longer than width — wrap_chapter's
     // documented v1 long-word policy).
-    for (idx, line) in lines.iter().enumerate() {
+    for (idx, line) in wrapped.lines.iter().enumerate() {
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         let cols = UnicodeWidthStr::width(text.as_str());
         if cols > width as usize {
