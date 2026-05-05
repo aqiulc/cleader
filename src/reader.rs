@@ -30,14 +30,19 @@ impl WrappedChapter {
     }
 
     /// Find the line at the given source offset, or the closest line
-    /// that starts at-or-before it. Returns `None` if there are no
-    /// lines (empty chapter).
+    /// that starts at-or-before it. If `target` is smaller than the
+    /// first line's offset, clamps to the first line (returns
+    /// `Some(0)`). Returns `None` only when there are no lines at all
+    /// (empty chapter).
     pub fn find_line_for_source(&self, target: usize) -> Option<usize> {
         if self.source_offsets.is_empty() {
             return None;
         }
         // partition_point gives us the first index whose offset is > target.
-        // We want the largest index whose offset is <= target.
+        // We want the largest index whose offset is <= target. If no offset
+        // is <= target (target precedes the first line), clamp to 0 — the
+        // user lands on the start of the chapter, which is the right
+        // recovery for an out-of-range query.
         let after = self.source_offsets.partition_point(|&off| off <= target);
         Some(after.saturating_sub(1))
     }
@@ -579,12 +584,35 @@ mod tests {
             pgraph("Second paragraph follows."),
         ];
         let wrapped = wrap_chapter(&blocks, 20);
+        assert_eq!(
+            wrapped.source_offsets.first(),
+            Some(&0),
+            "first line should always start at source offset 0"
+        );
         for window in wrapped.source_offsets.windows(2) {
             assert!(
                 window[0] <= window[1],
                 "source offsets must be monotonic non-decreasing: {window:?}"
             );
         }
+    }
+
+    #[test]
+    fn find_line_for_source_clamps_when_target_precedes_first_offset() {
+        // Synthesize a WrappedChapter whose first source offset is non-zero
+        // (e.g., a hypothetical caller injecting offsets directly). The
+        // clamp behavior is the documented recovery for an out-of-range
+        // target.
+        let wc = WrappedChapter {
+            lines: vec![Line::default(), Line::default()],
+            source_offsets: vec![10, 20],
+        };
+        assert_eq!(wc.find_line_for_source(0), Some(0));
+        assert_eq!(wc.find_line_for_source(5), Some(0));
+        assert_eq!(wc.find_line_for_source(10), Some(0));
+        assert_eq!(wc.find_line_for_source(15), Some(0));
+        assert_eq!(wc.find_line_for_source(20), Some(1));
+        assert_eq!(wc.find_line_for_source(99), Some(1));
     }
 
     #[test]

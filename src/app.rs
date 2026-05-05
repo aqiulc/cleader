@@ -280,12 +280,7 @@ impl App {
         if width_changed {
             // Save the source-char offset of the currently-visible top line
             // so we can land on the same content after rewrap.
-            let target_source = self
-                .wrapped
-                .source_offsets
-                .get(self.line_offset)
-                .copied()
-                .unwrap_or(0);
+            let target_source = self.wrapped_source_offset_at_top();
             self.wrapped = wrap_chapter(
                 &self.book.chapters[self.chapter_idx].blocks,
                 body_text_width(self.viewport_size.0),
