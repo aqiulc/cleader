@@ -1,6 +1,7 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Action {
     LineUp,
     LineDown,
@@ -8,6 +9,7 @@ pub enum Action {
     PagePrev,
     ChapterNext,
     ChapterPrev,
+    ToggleHelp,
     Quit,
     Resize(u16, u16),
 }
@@ -43,6 +45,11 @@ fn translate_key(key: KeyEvent) -> Option<Action> {
 
         (Char('n'), false, false) => Some(Action::ChapterNext),
         (Char('N'), false, _) => Some(Action::ChapterPrev),
+
+        // ? maps to ToggleHelp regardless of the SHIFT modifier — US
+        // layouts produce ? via Shift+/ (which arrives as Char('?')
+        // with SHIFT set), but kitty/some terminals report it bare.
+        (Char('?'), false, _) => Some(Action::ToggleHelp),
 
         _ => None,
     }
@@ -113,6 +120,18 @@ mod tests {
     #[test]
     fn resize_event_maps_correctly() {
         assert_eq!(translate(Event::Resize(120, 40)), Some(Action::Resize(120, 40)));
+    }
+
+    #[test]
+    fn question_mark_toggles_help() {
+        // ? on a US layout arrives as Char('?') with SHIFT modifier.
+        let q = key_with(KeyCode::Char('?'), KeyModifiers::SHIFT);
+        assert_eq!(translate(q), Some(Action::ToggleHelp));
+        // ? without shift (kitty/some terminals report it bare) also works.
+        assert_eq!(
+            translate(key(KeyCode::Char('?'))),
+            Some(Action::ToggleHelp)
+        );
     }
 
     #[test]

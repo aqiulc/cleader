@@ -93,6 +93,7 @@ fn event_loop(
                         warning: app.save_error(),
                         width: area.width,
                     },
+                    show_help: app.show_help(),
                 },
             );
         })?;

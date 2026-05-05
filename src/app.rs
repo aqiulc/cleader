@@ -19,6 +19,10 @@ pub struct App {
     /// warning was eaten by the alternate screen and the user had no
     /// indication that their position wasn't being saved.
     save_error: Option<String>,
+    /// Whether the help-screen overlay is currently being shown. Toggled
+    /// by `?`; dismissed by any quit-key while up (Esc/q/Ctrl+C). The
+    /// renderer overlays a centered modal listing keybindings when set.
+    show_help: bool,
 }
 
 impl App {
@@ -66,6 +70,7 @@ impl App {
             persistence,
             should_quit: false,
             save_error: migration_error,
+            show_help: false,
         }
     }
 
@@ -104,6 +109,11 @@ impl App {
 
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    /// Whether the help-screen overlay is currently being shown.
+    pub fn show_help(&self) -> bool {
+        self.show_help
     }
 
     fn lines_per_page(&self) -> usize {
@@ -205,9 +215,20 @@ impl App {
                 self.save();
             }
             Action::Resize(w, h) => self.resize(w, h),
+            Action::ToggleHelp => {
+                self.show_help = !self.show_help;
+            }
             Action::Quit => {
-                self.save();
-                self.should_quit = true;
+                if self.show_help {
+                    // Esc / Ctrl+C / q while help is showing: dismiss
+                    // the overlay instead of quitting the reader. The
+                    // user can still quit by dismissing first and
+                    // pressing q again.
+                    self.show_help = false;
+                } else {
+                    self.save();
+                    self.should_quit = true;
+                }
             }
         }
     }
@@ -796,6 +817,36 @@ mod tests {
         let app = App::new(book, p_handle, (80, 24));
         assert_eq!(app.chapter_idx(), 0);
         assert_eq!(app.line_offset(), 0);
+    }
+
+    #[test]
+    fn toggle_help_flips_state() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("hi")]]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        assert!(!app.show_help(), "App starts with help hidden");
+        app.handle(Action::ToggleHelp);
+        assert!(app.show_help(), "ToggleHelp shows the overlay");
+        app.handle(Action::ToggleHelp);
+        assert!(!app.show_help(), "Second ToggleHelp dismisses");
+    }
+
+    #[test]
+    fn quit_while_help_is_showing_dismisses_instead_of_quitting() {
+        // Esc / Ctrl+C / q during help-mode should close the overlay,
+        // not quit the reader. The user dismisses help first, THEN
+        // quits if they want to.
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("hi")]]);
+        let mut app = App::new(book, p_handle, (80, 24));
+        app.handle(Action::ToggleHelp);
+        assert!(app.show_help());
+        app.handle(Action::Quit);
+        assert!(!app.show_help(), "Quit while help shown should dismiss help");
+        assert!(!app.should_quit(), "App should NOT be quitting yet");
+        // Now Quit again — actually quits.
+        app.handle(Action::Quit);
+        assert!(app.should_quit(), "Quit with help dismissed should set quit flag");
     }
 
     #[test]
