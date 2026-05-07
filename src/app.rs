@@ -23,6 +23,15 @@ pub struct App {
     /// by `?`; dismissed by any quit-key while up (Esc/q/Ctrl+C). The
     /// renderer overlays a centered modal listing keybindings when set.
     show_help: bool,
+    /// Whether the table-of-contents overlay is currently being shown.
+    /// Toggled by `t`; while up, navigation actions move
+    /// `toc_selection` instead of the body, Confirm jumps to the
+    /// selected chapter, and quit-keys dismiss without jumping.
+    show_toc: bool,
+    /// Currently-highlighted chapter in the TOC list. 0..book.chapters.len().
+    /// Initialized to chapter_idx when the overlay opens, so the user
+    /// starts with their current chapter highlighted.
+    toc_selection: usize,
     /// User-configured body text width cap (from `--width`). Stored so
     /// that re-wraps (load_chapter, resize) keep using the user's
     /// chosen value rather than reverting to the built-in default.
@@ -80,6 +89,8 @@ impl App {
             should_quit: false,
             save_error: migration_error,
             show_help: false,
+            show_toc: false,
+            toc_selection: 0,
             max_body_width,
         }
     }
@@ -124,6 +135,18 @@ impl App {
     /// Whether the help-screen overlay is currently being shown.
     pub fn show_help(&self) -> bool {
         self.show_help
+    }
+
+    /// Whether the table-of-contents overlay is currently being shown.
+    pub fn show_toc(&self) -> bool {
+        self.show_toc
+    }
+
+    /// Index of the chapter currently highlighted in the TOC overlay.
+    /// Only meaningful while `show_toc` is true; equals `chapter_idx`
+    /// at the moment the overlay opens.
+    pub fn toc_selection(&self) -> usize {
+        self.toc_selection
     }
 
     /// User-configured body text width cap. Reflects the value passed
@@ -211,6 +234,44 @@ impl App {
     }
 
     pub fn handle(&mut self, action: Action) {
+        if self.show_toc {
+            // TOC mode swallows most actions and remaps navigation.
+            match action {
+                Action::LineUp => self.toc_select_prev(),
+                Action::LineDown => self.toc_select_next(),
+                Action::PageNext | Action::PagePrev => {
+                    // Page-level nav also moves selection — covers
+                    // long TOCs where line-by-line is tedious.
+                    let step = self.lines_per_page().min(10);
+                    if matches!(action, Action::PageNext) {
+                        for _ in 0..step {
+                            self.toc_select_next();
+                        }
+                    } else {
+                        for _ in 0..step {
+                            self.toc_select_prev();
+                        }
+                    }
+                }
+                Action::Confirm => self.toc_jump_to_selection(),
+                Action::ToggleToc => self.show_toc = false,
+                Action::ToggleHelp => {
+                    // Toggle into help mode FROM toc mode: dismiss toc
+                    // first, then surface the help overlay. Keeps the
+                    // two overlays mutually exclusive.
+                    self.show_toc = false;
+                    self.show_help = true;
+                }
+                Action::Quit => self.show_toc = false,
+                Action::Resize(w, h) => self.resize(w, h),
+                Action::ChapterNext | Action::ChapterPrev => {
+                    // Chapter nav while TOC is up is ambiguous — the user
+                    // probably wanted TOC selection nav. Treat as no-op.
+                }
+            }
+            return;
+        }
+
         match action {
             Action::LineDown => self.line_down(),
             Action::LineUp => self.line_up(),
@@ -234,6 +295,16 @@ impl App {
             Action::ToggleHelp => {
                 self.show_help = !self.show_help;
             }
+            Action::ToggleToc => {
+                self.show_toc = true;
+                // Start the TOC selection on whatever chapter the user
+                // is currently reading — most natural anchor.
+                self.toc_selection = self.chapter_idx;
+            }
+            Action::Confirm => {
+                // No-op outside of overlay context for now. Future
+                // features may bind it elsewhere.
+            }
             Action::Quit => {
                 if self.show_help {
                     // Esc / Ctrl+C / q while help is showing: dismiss
@@ -247,6 +318,27 @@ impl App {
                 }
             }
         }
+    }
+
+    fn toc_select_prev(&mut self) {
+        if self.toc_selection > 0 {
+            self.toc_selection -= 1;
+        }
+    }
+
+    fn toc_select_next(&mut self) {
+        if self.toc_selection + 1 < self.book.chapters.len() {
+            self.toc_selection += 1;
+        }
+    }
+
+    fn toc_jump_to_selection(&mut self) {
+        // Land at the start of the selected chapter.
+        if self.toc_selection != self.chapter_idx {
+            self.load_chapter(self.toc_selection, 0);
+            self.save();
+        }
+        self.show_toc = false;
     }
 
     fn line_down(&mut self) {
@@ -893,6 +985,93 @@ mod tests {
             app.save_error().is_none(),
             "successful flush should leave save_error as None"
         );
+    }
+
+    #[test]
+    fn toggle_toc_initializes_selection_to_current_chapter() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![
+            vec![p("ch1")],
+            vec![p("ch2")],
+            vec![p("ch3")],
+        ]);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
+        // Move to chapter 2.
+        app.handle(Action::ChapterNext);
+        app.handle(Action::ChapterNext);
+        assert_eq!(app.chapter_idx(), 2);
+        // Open TOC.
+        app.handle(Action::ToggleToc);
+        assert!(app.show_toc());
+        assert_eq!(app.toc_selection(), 2);
+    }
+
+    #[test]
+    fn toc_navigation_moves_selection_not_body() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![
+            vec![p("ch1")],
+            vec![p("ch2")],
+            vec![p("ch3")],
+        ]);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
+        let body_offset_before = app.line_offset();
+        app.handle(Action::ToggleToc);
+        assert_eq!(app.toc_selection(), 0);
+        app.handle(Action::LineDown);
+        assert_eq!(app.toc_selection(), 1);
+        app.handle(Action::LineDown);
+        assert_eq!(app.toc_selection(), 2);
+        // Body unchanged.
+        assert_eq!(app.line_offset(), body_offset_before);
+    }
+
+    #[test]
+    fn toc_selection_clamps_at_bounds() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("ch1")], vec![p("ch2")]]);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
+        app.handle(Action::ToggleToc);
+        // At top: LineUp is no-op.
+        app.handle(Action::LineUp);
+        assert_eq!(app.toc_selection(), 0);
+        // At bottom: LineDown is no-op.
+        app.handle(Action::LineDown);
+        app.handle(Action::LineDown); // already at last
+        assert_eq!(app.toc_selection(), 1);
+    }
+
+    #[test]
+    fn toc_confirm_jumps_to_selection_and_dismisses() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![
+            vec![p("ch1")],
+            vec![p("ch2")],
+            vec![p("ch3")],
+        ]);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
+        assert_eq!(app.chapter_idx(), 0);
+        app.handle(Action::ToggleToc);
+        app.handle(Action::LineDown);
+        app.handle(Action::LineDown);
+        assert_eq!(app.toc_selection(), 2);
+        app.handle(Action::Confirm);
+        assert_eq!(app.chapter_idx(), 2);
+        assert!(!app.show_toc());
+    }
+
+    #[test]
+    fn toc_esc_dismisses_without_jumping() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("ch1")], vec![p("ch2")]]);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
+        app.handle(Action::ToggleToc);
+        app.handle(Action::LineDown);
+        assert_eq!(app.toc_selection(), 1);
+        app.handle(Action::Quit);
+        assert_eq!(app.chapter_idx(), 0, "should NOT have jumped");
+        assert!(!app.show_toc());
+        assert!(!app.should_quit());
     }
 
     #[test]

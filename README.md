@@ -56,6 +56,7 @@ cleader ~/Books/Firefly_Generations.epub
 | Flip a page | `←` / `→` or `h` / `l` or `Space` / `b` or `PgUp` / `PgDn` |
 | Next chapter | `n` |
 | Previous chapter | `N` (Shift+n) |
+| Open table of contents | `t` |
 | Quit (saves position) | `q`, `Esc`, or `Ctrl+C` |
 
 ### Where your reading position is saved

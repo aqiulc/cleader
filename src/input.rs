@@ -10,6 +10,8 @@ pub enum Action {
     ChapterNext,
     ChapterPrev,
     ToggleHelp,
+    ToggleToc,
+    Confirm,
     Quit,
     Resize(u16, u16),
 }
@@ -50,6 +52,9 @@ fn translate_key(key: KeyEvent) -> Option<Action> {
         // layouts produce ? via Shift+/ (which arrives as Char('?')
         // with SHIFT set), but kitty/some terminals report it bare.
         (Char('?'), false, _) => Some(Action::ToggleHelp),
+
+        (Char('t'), false, false) => Some(Action::ToggleToc),
+        (Enter, _, _) => Some(Action::Confirm),
 
         _ => None,
     }
@@ -132,6 +137,16 @@ mod tests {
             translate(key(KeyCode::Char('?'))),
             Some(Action::ToggleHelp)
         );
+    }
+
+    #[test]
+    fn t_toggles_toc() {
+        assert_eq!(translate(key(KeyCode::Char('t'))), Some(Action::ToggleToc));
+    }
+
+    #[test]
+    fn enter_is_confirm() {
+        assert_eq!(translate(key(KeyCode::Enter)), Some(Action::Confirm));
     }
 
     #[test]

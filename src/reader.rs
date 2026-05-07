@@ -1,4 +1,4 @@
-use crate::epub::{Block, Span, SpanStyle};
+use crate::epub::{Block, ChapterKind, Span, SpanStyle};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -320,6 +320,35 @@ pub struct RenderInput<'a> {
     /// the centered body column; `body_text_width` uses it to set the
     /// wrap target. Both must agree or the wrap output gets clipped.
     pub max_body_width: u16,
+    /// When `Some`, draw the table-of-contents overlay (a centered modal
+    /// listing every chapter) on top of the body and status bar. The
+    /// help overlay wins when both are somehow set; the App is expected
+    /// to keep them mutually exclusive.
+    pub toc: Option<TocOverlay<'a>>,
+}
+
+/// Data the renderer needs to draw the TOC overlay. `None` (in
+/// `RenderInput::toc`) when the overlay is not visible.
+///
+/// The lifetime parameter is reserved for future use (e.g. borrowing
+/// chapter labels from the Book rather than cloning them) and is
+/// currently held by a PhantomData so the public type signature can
+/// stabilize before the implementation borrows.
+pub struct TocOverlay<'a> {
+    /// All chapter labels in order. Each entry is `(label, kind)`
+    /// where label is what to display and kind distinguishes Main
+    /// from FrontMatter for visual styling. Use `Chapter::title` with
+    /// a fallback to `"Chapter N"` when None.
+    pub entries: Vec<(String, ChapterKind)>,
+    /// Currently-selected entry. Renderer draws this with a Reversed
+    /// background so the user can see "where Enter would take me."
+    pub selection: usize,
+    /// Index of the chapter the user is actually reading. Highlighted
+    /// with a `▶` prefix so the user can see "where I am" vs "where
+    /// would Enter take me."
+    pub current_chapter: usize,
+    #[doc(hidden)]
+    pub _phantom: std::marker::PhantomData<&'a ()>,
 }
 
 /// The body's column cap when the user doesn't specify `--width`.
@@ -338,6 +367,7 @@ const HELP_LINES: &[(&str, &str)] = &[
     ("Flip a page", "← → / h l / Space b / PgUp PgDn"),
     ("Next chapter", "n"),
     ("Previous chapter", "N (Shift+n)"),
+    ("Table of contents", "t"),
     ("Toggle this help", "?"),
     ("Quit (saves position)", "q / Esc / Ctrl+C"),
 ];
@@ -394,6 +424,8 @@ pub fn render(frame: &mut Frame, area: Rect, input: RenderInput<'_>) {
 
     if input.show_help {
         render_help_overlay(frame, area);
+    } else if let Some(toc) = &input.toc {
+        render_toc_overlay(frame, area, toc);
     }
 }
 
@@ -458,6 +490,114 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     // Clear underneath so body text doesn't bleed through the modal.
     frame.render_widget(Clear, modal_area);
     frame.render_widget(Paragraph::new(lines).block(block), modal_area);
+}
+
+/// Render a centered modal over `area` listing every chapter and
+/// highlighting the user's selection.
+///
+/// Mirrors `render_help_overlay`: `Clear` first to keep body text from
+/// bleeding through, modal sized to fit content but clamped to `area`
+/// so it never tries to draw outside the frame.
+fn render_toc_overlay(frame: &mut Frame, area: Rect, toc: &TocOverlay<'_>) {
+    // Modal sized to fit a reasonable number of entries on screen.
+    let max_entry_width = toc
+        .entries
+        .iter()
+        .map(|(label, _)| UnicodeWidthStr::width(label.as_str()))
+        .max()
+        .unwrap_or(20);
+    // Entry width: prefix (2) + main-idx repr (5) + label + small padding.
+    // Clamp to area.width so we never overflow the frame (which would
+    // panic in ratatui). On terminals narrower than the desired
+    // minimum (30), use the full width — the overlay still draws but
+    // labels may truncate.
+    let desired_width = (max_entry_width as u16).saturating_add(12).max(30);
+    let modal_width = desired_width.min(area.width);
+    // Modal height: borders (2) + entries + spacer + footer — capped
+    // at area. visible_entries is bounded to at-least-1 so the modal
+    // still draws on extremely short terminals (the TestBackend smoke
+    // tests exercise this path).
+    let visible_entries = (area.height.saturating_sub(6) as usize)
+        .clamp(1, toc.entries.len().max(1));
+    let desired_height = (visible_entries as u16).saturating_add(4).max(7);
+    let modal_height = desired_height.min(area.height);
+
+    let x = area.x + area.width.saturating_sub(modal_width) / 2;
+    let y = area.y + area.height.saturating_sub(modal_height) / 2;
+    let modal_area = Rect {
+        x,
+        y,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Compute scroll: keep selection in view.
+    let scroll = compute_toc_scroll(toc.selection, toc.entries.len(), visible_entries);
+
+    let end = (scroll + visible_entries).min(toc.entries.len());
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible_entries + 2);
+    for abs_idx in scroll..end {
+        let (label, kind) = &toc.entries[abs_idx];
+        let is_selected = abs_idx == toc.selection;
+        let is_current = abs_idx == toc.current_chapter;
+        let is_main = matches!(kind, ChapterKind::Main);
+
+        let prefix = if is_current { "▶ " } else { "  " };
+        let main_idx_repr = if is_main {
+            // Compute 1-based main-chapter number on the fly.
+            let main_count_so_far = toc
+                .entries
+                .iter()
+                .take(abs_idx + 1)
+                .filter(|(_, k)| matches!(k, ChapterKind::Main))
+                .count();
+            format!("{:>3}. ", main_count_so_far)
+        } else {
+            // Front matter: no number, just spacing.
+            "     ".to_string()
+        };
+
+        let mut style = Style::default();
+        if is_selected {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        if !is_main {
+            style = style.add_modifier(Modifier::DIM);
+        }
+
+        let line = Line::from(vec![
+            TuiSpan::raw(prefix.to_string()),
+            TuiSpan::styled(format!("{}{}", main_idx_repr, label), style),
+        ]);
+        lines.push(line);
+    }
+
+    let footer = Line::from(vec![TuiSpan::styled(
+        "  Enter jump · ↑↓ navigate · Esc close",
+        Style::default().add_modifier(Modifier::DIM),
+    )]);
+    lines.push(Line::default());
+    lines.push(footer);
+
+    let block = TuiBlock::default()
+        .title(" Table of contents ")
+        .borders(Borders::ALL);
+
+    frame.render_widget(Clear, modal_area);
+    frame.render_widget(Paragraph::new(lines).block(block), modal_area);
+}
+
+/// Adjust scroll so `selection` is within the visible window. Centers
+/// the selection when possible, clamps to start/end at the boundaries.
+fn compute_toc_scroll(selection: usize, total: usize, visible: usize) -> usize {
+    if total <= visible {
+        return 0;
+    }
+    if selection < visible / 2 {
+        return 0;
+    }
+    let max_scroll = total.saturating_sub(visible);
+    selection.saturating_sub(visible / 2).min(max_scroll)
 }
 
 /// Width in columns the wrap step should target, given the terminal
@@ -834,6 +974,7 @@ mod tests {
             },
             show_help: false,
             max_body_width: DEFAULT_MAX_BODY_WIDTH,
+            toc: None,
         };
     }
 
@@ -887,6 +1028,7 @@ mod tests {
                     },
                     show_help: true,
                     max_body_width: DEFAULT_MAX_BODY_WIDTH,
+                    toc: None,
                 };
                 render(frame, area, input);
             })
@@ -917,6 +1059,7 @@ mod tests {
                     },
                     show_help: true,
                     max_body_width: DEFAULT_MAX_BODY_WIDTH,
+                    toc: None,
                 };
                 render(frame, area, input);
             })
@@ -952,9 +1095,70 @@ mod tests {
                         },
                         show_help: false,
                         max_body_width: 120,
+                        toc: None,
                     },
                 );
             })
             .unwrap();
+    }
+
+    #[test]
+    fn toc_overlay_does_not_panic_on_narrow_terminal() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(20, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render(
+                    frame,
+                    area,
+                    RenderInput {
+                        wrapped: &[],
+                        line_offset: 0,
+                        status: StatusInput {
+                            title: "x",
+                            chapter_display: None,
+                            page: 1,
+                            total_pages: 1,
+                            warning: None,
+                            width: area.width,
+                        },
+                        show_help: false,
+                        max_body_width: DEFAULT_MAX_BODY_WIDTH,
+                        toc: Some(TocOverlay {
+                            entries: vec![
+                                ("Cover".into(), ChapterKind::FrontMatter),
+                                (
+                                    "Chapter 1: A Long Title That Will Wrap".into(),
+                                    ChapterKind::Main,
+                                ),
+                                ("Chapter 2".into(), ChapterKind::Main),
+                            ],
+                            selection: 1,
+                            current_chapter: 0,
+                            _phantom: std::marker::PhantomData,
+                        }),
+                    },
+                );
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn compute_toc_scroll_keeps_selection_in_view() {
+        // Total 100 entries, window of 10.
+        // Selection at start: scroll 0.
+        assert_eq!(compute_toc_scroll(0, 100, 10), 0);
+        assert_eq!(compute_toc_scroll(4, 100, 10), 0);
+        // Selection in middle: centered (selection - visible/2).
+        assert_eq!(compute_toc_scroll(50, 100, 10), 45);
+        // Selection near end: clamps to max_scroll.
+        assert_eq!(compute_toc_scroll(95, 100, 10), 90);
+        assert_eq!(compute_toc_scroll(99, 100, 10), 90);
+        // Total fits in window: no scroll.
+        assert_eq!(compute_toc_scroll(5, 8, 10), 0);
     }
 }

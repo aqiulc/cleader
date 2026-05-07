@@ -88,6 +88,29 @@ fn event_loop(
         terminal.draw(|frame| {
             let area = frame.area();
             let title = app.book().title.clone();
+            let toc = if app.show_toc() {
+                let entries: Vec<(String, cleader::epub::ChapterKind)> = app
+                    .book()
+                    .chapters
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, ch)| {
+                        let label = ch
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| format!("Chapter {}", idx + 1));
+                        (label, ch.kind)
+                    })
+                    .collect();
+                Some(cleader::reader::TocOverlay {
+                    entries,
+                    selection: app.toc_selection(),
+                    current_chapter: app.chapter_idx(),
+                    _phantom: std::marker::PhantomData,
+                })
+            } else {
+                None
+            };
             render(
                 frame,
                 area,
@@ -104,6 +127,7 @@ fn event_loop(
                     },
                     show_help: app.show_help(),
                     max_body_width: app.max_body_width(),
+                    toc,
                 },
             );
         })?;
