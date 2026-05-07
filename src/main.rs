@@ -103,6 +103,7 @@ fn event_loop(
                         width: area.width,
                     },
                     show_help: app.show_help(),
+                    max_body_width: app.max_body_width(),
                 },
             );
         })?;

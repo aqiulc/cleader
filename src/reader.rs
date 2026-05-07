@@ -316,6 +316,10 @@ pub struct RenderInput<'a> {
     /// When true, draw the help-screen overlay (a centered modal
     /// listing every keybinding) on top of the body and status bar.
     pub show_help: bool,
+    /// User-configured body width cap. The renderer uses this to size
+    /// the centered body column; `body_text_width` uses it to set the
+    /// wrap target. Both must agree or the wrap output gets clipped.
+    pub max_body_width: u16,
 }
 
 /// The body's column cap when the user doesn't specify `--width`.
@@ -351,8 +355,8 @@ pub fn render(frame: &mut Frame, area: Rect, input: RenderInput<'_>) {
     let body_area = chunks[0];
     let status_area = chunks[1];
 
-    // Compute centered body column, capped at DEFAULT_MAX_BODY_WIDTH.
-    let body_width = body_area.width.min(DEFAULT_MAX_BODY_WIDTH);
+    // Compute centered body column, capped at the user's configured width.
+    let body_width = body_area.width.min(input.max_body_width);
     let h_offset = (body_area.width - body_width) / 2;
     let body_rect = Rect {
         x: body_area.x + h_offset,
@@ -829,6 +833,7 @@ mod tests {
                 width: 80,
             },
             show_help: false,
+            max_body_width: DEFAULT_MAX_BODY_WIDTH,
         };
     }
 
@@ -881,6 +886,7 @@ mod tests {
                         width: area.width,
                     },
                     show_help: true,
+                    max_body_width: DEFAULT_MAX_BODY_WIDTH,
                 };
                 render(frame, area, input);
             })
@@ -910,8 +916,44 @@ mod tests {
                         width: area.width,
                     },
                     show_help: true,
+                    max_body_width: DEFAULT_MAX_BODY_WIDTH,
                 };
                 render(frame, area, input);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_with_custom_width_above_terminal_does_not_panic() {
+        // The user passed --width=120 on a 60-col terminal. The wrap
+        // produced lines targeting min(60, 120)-3 = 57 cols. The
+        // renderer's body rect should be sized to min(60, 120) = 60.
+        // Both agree; no clipping, no panic.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render(
+                    frame,
+                    area,
+                    RenderInput {
+                        wrapped: &[],
+                        line_offset: 0,
+                        status: StatusInput {
+                            title: "x",
+                            chapter_display: None,
+                            page: 1,
+                            total_pages: 1,
+                            warning: None,
+                            width: area.width,
+                        },
+                        show_help: false,
+                        max_body_width: 120,
+                    },
+                );
             })
             .unwrap();
     }
