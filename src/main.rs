@@ -55,7 +55,7 @@ fn install_panic_hook() {
 }
 
 fn run(cli: Cli) -> anyhow::Result<()> {
-    let book = Book::open(&cli.path)?;
+    let book = Book::open(&cli.path, cli.width)?;
     let persistence = Persistence::open()?;
 
     let mut terminal = setup_terminal()?;

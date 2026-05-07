@@ -15,6 +15,15 @@ use image::imageops::FilterType;
 /// determines the actual ink color.
 const ASCII_GRADIENT: &[u8] = b" .:-=+*#%@";
 
+/// Defensive upper bound on rendered ASCII-art row count. Real book
+/// covers are roughly 1:1.5 aspect — at width 60 that's 45 rows; at
+/// width 200, 150 rows. 4096 is well past anything reasonable. The
+/// clamp catches malformed/adversarial inputs (e.g., a 1×100000
+/// source image) so the `image` crate isn't asked to allocate
+/// gigabytes of luma data, and the row computation can't overflow
+/// `u32`.
+const MAX_TARGET_HEIGHT: u32 = 4096;
+
 /// Convert raw image bytes to a Vec of ASCII rows, each row exactly
 /// `target_width` characters wide. Height is derived from the source
 /// aspect ratio (terminal cells are ~2:1, so the row count is roughly
@@ -32,7 +41,11 @@ pub fn image_to_ascii(
     let target_width = target_width.max(1);
     let aspect = img.height() as f32 / img.width() as f32;
     // Halve the height to compensate for terminal cells being ~2:1.
-    let target_height = ((target_width as f32 * aspect * 0.5).round() as u32).max(1);
+    // Clamp to MAX_TARGET_HEIGHT so a pathological aspect ratio
+    // (e.g. a 1×100000 source image) can't overflow `u32` or push
+    // the resize step into multi-gigabyte allocations.
+    let target_height = ((target_width as f32 * aspect * 0.5).round() as u32)
+        .clamp(1, MAX_TARGET_HEIGHT);
 
     let resized = image::imageops::resize(
         &img,
@@ -135,5 +148,15 @@ mod tests {
         for line in &lines {
             assert_eq!(line.chars().count(), 1);
         }
+    }
+
+    #[test]
+    fn pathological_aspect_ratio_does_not_overflow() {
+        // 1x10000 image (1:10000 aspect) at width=10 would otherwise
+        // produce a target_height of ~50000 rows. Clamp ensures the
+        // image crate doesn't get asked to allocate gigabytes.
+        let bytes = solid_png(1, 10000, 128);
+        let lines = image_to_ascii(&bytes, 10).unwrap();
+        assert!(lines.len() <= MAX_TARGET_HEIGHT as usize);
     }
 }

@@ -38,6 +38,7 @@ impl Span {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Block {
     Heading { level: u8, spans: Vec<Span> },
     Paragraph { spans: Vec<Span> },
@@ -432,7 +433,19 @@ impl Book {
         self.id.to_string()
     }
 
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, EpubError> {
+    /// Open and parse an EPUB.
+    ///
+    /// `cover_target_width` controls the column width used when
+    /// rendering the cover image as ASCII art. Use
+    /// `cleader::reader::DEFAULT_MAX_BODY_WIDTH` if you have no
+    /// preference (matches the App's default body width). The
+    /// previous v0.3.2 form hard-coded a width of 60; callers must
+    /// now pass an explicit value so the cover matches the user's
+    /// configured `--width`.
+    pub fn open(
+        path: impl AsRef<Path>,
+        cover_target_width: u16,
+    ) -> Result<Self, EpubError> {
         let path = path.as_ref();
         if !path.exists() {
             return Err(EpubError::NotFound(path.to_path_buf()));
@@ -515,9 +528,9 @@ impl Book {
         // the cover slot from the EPUB's spine). If there's no cover
         // image, no FrontMatter chapter, or the image fails to decode,
         // leave the existing [image: ...] placeholder in place. The
-        // target_width=60 is a fixed compromise; a future task could use
-        // the body width or terminal width.
-        let cover_target_width: u16 = 60;
+        // target width comes from the caller so the cover matches the
+        // user's configured body width (`--width`) — a 60-col cover
+        // floating in a 120-col body reads like a bug.
         let mut chapters = chapters;
         if let Some((cover_bytes, _mime)) = doc.get_cover() {
             if let Ok(ascii) = crate::ascii_art::image_to_ascii(&cover_bytes, cover_target_width) {

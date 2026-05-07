@@ -49,7 +49,8 @@ fn require_book(path_hint: Option<&str>) -> Option<PathBuf> {
 #[test]
 fn opens_a_real_epub_and_extracts_chapters() {
     let Some(path) = require_book(None) else { return; };
-    let book = Book::open(&path).expect("should open a known-good EPUB");
+    let book = Book::open(&path, cleader::reader::DEFAULT_MAX_BODY_WIDTH)
+        .expect("should open a known-good EPUB");
     assert!(!book.chapters.is_empty(), "must extract at least one chapter");
     assert!(!book.title.trim().is_empty(), "title must not be empty");
     assert!(!book.id.as_str().is_empty(), "book id must not be empty");
@@ -58,15 +59,15 @@ fn opens_a_real_epub_and_extracts_chapters() {
 #[test]
 fn opening_same_epub_twice_yields_same_id() {
     let Some(path) = require_book(None) else { return; };
-    let book1 = Book::open(&path).unwrap();
-    let book2 = Book::open(&path).unwrap();
+    let book1 = Book::open(&path, cleader::reader::DEFAULT_MAX_BODY_WIDTH).unwrap();
+    let book2 = Book::open(&path, cleader::reader::DEFAULT_MAX_BODY_WIDTH).unwrap();
     assert_eq!(book1.id, book2.id);
 }
 
 #[test]
 fn extracted_chapters_contain_paragraph_text() {
     let Some(path) = require_book(None) else { return; };
-    let book = Book::open(&path).unwrap();
+    let book = Book::open(&path, cleader::reader::DEFAULT_MAX_BODY_WIDTH).unwrap();
     let any_paragraph = book
         .chapters
         .iter()
@@ -77,7 +78,7 @@ fn extracted_chapters_contain_paragraph_text() {
 
 #[test]
 fn missing_path_returns_not_found_error() {
-    let result = Book::open("/no/such/file.epub");
+    let result = Book::open("/no/such/file.epub", cleader::reader::DEFAULT_MAX_BODY_WIDTH);
     assert!(result.is_err());
 }
 
@@ -90,7 +91,7 @@ fn toc_filtering_classifies_front_matter() {
     let Some(path) = require_book(Some("books/Threshold (Will Wight).epub")) else {
         return;
     };
-    let book = Book::open(&path).unwrap();
+    let book = Book::open(&path, cleader::reader::DEFAULT_MAX_BODY_WIDTH).unwrap();
     let any_front = book
         .chapters
         .iter()
@@ -112,7 +113,7 @@ fn threshold_known_structure() {
     let Some(path) = require_book(Some("books/Threshold (Will Wight).epub")) else {
         return;
     };
-    let book = Book::open(&path).unwrap();
+    let book = Book::open(&path, cleader::reader::DEFAULT_MAX_BODY_WIDTH).unwrap();
     assert_eq!(book.title, "Threshold");
     assert_eq!(book.author, "Will Wight");
     assert_eq!(book.chapters.len(), 20, "total chapters (incl. cover)");
@@ -147,7 +148,7 @@ fn threshold_cover_is_rendered_as_ascii_art() {
     let Some(path) = require_book(Some("books/Threshold (Will Wight).epub")) else {
         return;
     };
-    let book = Book::open(&path).unwrap();
+    let book = Book::open(&path, cleader::reader::DEFAULT_MAX_BODY_WIDTH).unwrap();
     let cover = book
         .chapters
         .iter()
@@ -171,7 +172,7 @@ fn threshold_cover_is_rendered_as_ascii_art() {
 fn wrap_pipeline_on_real_epub_respects_width() {
     use unicode_width::UnicodeWidthStr;
     let Some(path) = require_book(None) else { return; };
-    let book = Book::open(&path).unwrap();
+    let book = Book::open(&path, cleader::reader::DEFAULT_MAX_BODY_WIDTH).unwrap();
     // Pick the first Main chapter with substantial content (avoids a tiny
     // copyright page producing a misleading single-line wrap).
     let chapter = book
