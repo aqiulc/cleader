@@ -141,6 +141,28 @@ fn threshold_known_structure() {
     );
 }
 
+#[test]
+fn threshold_cover_is_rendered_as_ascii_art() {
+    use cleader::epub::{Block, ChapterKind};
+    let Some(path) = require_book(Some("books/Threshold (Will Wight).epub")) else {
+        return;
+    };
+    let book = Book::open(&path).unwrap();
+    let cover = book
+        .chapters
+        .iter()
+        .find(|c| matches!(c.kind, ChapterKind::FrontMatter))
+        .expect("Threshold should have a FrontMatter chapter (cover)");
+    let has_image_block = cover
+        .blocks
+        .iter()
+        .any(|b| matches!(b, Block::Image(_)));
+    assert!(
+        has_image_block,
+        "Threshold cover should be rendered as Block::Image (ASCII art)"
+    );
+}
+
 /// End-to-end pipeline: load a real EPUB → wrap a real chapter → verify
 /// the wrap output is non-empty and respects the width contract. The
 /// existing reader unit tests use synthetic blocks; this proves the full

@@ -42,6 +42,11 @@ pub enum Block {
     Heading { level: u8, spans: Vec<Span> },
     Paragraph { spans: Vec<Span> },
     Blank,
+    /// Pre-rendered ASCII art lines. Each String is one row of fixed-
+    /// width characters. The wrapper emits them as-is — no word
+    /// wrapping, no styling. Lines wider than the body get clipped
+    /// at the right edge.
+    Image(Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,6 +408,13 @@ fn classify(blocks: &[Block]) -> ChapterKind {
                     saw_real = true;
                 }
             }
+            Block::Image(_) => {
+                // Pre-rendered ASCII art is image-only content. In the
+                // current pipeline `Image` only appears after the cover
+                // replacement (post-classify), but classify must remain
+                // total over the enum.
+                saw_image_only = true;
+            }
         }
     }
     if !saw_real && saw_image_only {
@@ -496,6 +508,26 @@ impl Book {
 
         if chapters.is_empty() {
             return Err(EpubError::NoChapters);
+        }
+
+        // After all chapters are collected, fetch the cover if available
+        // and render it as ASCII art on the FrontMatter chapter (typically
+        // the cover slot from the EPUB's spine). If there's no cover
+        // image, no FrontMatter chapter, or the image fails to decode,
+        // leave the existing [image: ...] placeholder in place. The
+        // target_width=60 is a fixed compromise; a future task could use
+        // the body width or terminal width.
+        let cover_target_width: u16 = 60;
+        let mut chapters = chapters;
+        if let Some((cover_bytes, _mime)) = doc.get_cover() {
+            if let Ok(ascii) = crate::ascii_art::image_to_ascii(&cover_bytes, cover_target_width) {
+                for ch in chapters.iter_mut() {
+                    if matches!(ch.kind, ChapterKind::FrontMatter) {
+                        ch.blocks = vec![Block::Image(ascii)];
+                        break;
+                    }
+                }
+            }
         }
 
         Ok(Book {

@@ -97,6 +97,19 @@ pub fn wrap_chapter(blocks: &[Block], width: u16) -> WrappedChapter {
                 lines.push(Line::default());
                 source_offsets.push(chapter_offset);
             }
+            Block::Image(ascii_lines) => {
+                // Pre-rendered ASCII art: emit each line as-is.
+                // No wrapping, no styling; the renderer handles clipping.
+                for art_line in ascii_lines {
+                    let line_chars = art_line.chars().count();
+                    lines.push(Line::from(art_line.clone()));
+                    source_offsets.push(chapter_offset);
+                    chapter_offset += line_chars;
+                }
+                // Trailing blank for visual breathing room.
+                lines.push(Line::default());
+                source_offsets.push(chapter_offset);
+            }
         }
     }
 
@@ -796,6 +809,28 @@ mod tests {
             bold_lines >= 2,
             "bold modifier must survive across wrap; bold appeared on {bold_lines} line(s)"
         );
+    }
+
+    #[test]
+    fn wrap_chapter_emits_image_lines_unwrapped() {
+        let blocks = vec![Block::Image(vec![
+            "  .:-=  ".into(),
+            "  =+*#  ".into(),
+            "  *#%@  ".into(),
+        ])];
+        // Width 4 — the image lines are 8 chars wide, but we don't wrap them.
+        // The renderer will clip; wrap_chapter just emits.
+        let wrapped = wrap_chapter(&blocks, 4);
+        // Three art lines + trailing blank, then the trailing-blank trim
+        // removes the last blank → 3 lines.
+        assert_eq!(wrapped.lines.len(), 3);
+        // Each line preserved verbatim.
+        let line_text = |line: &Line| -> String {
+            line.spans.iter().map(|s| s.content.as_ref()).collect()
+        };
+        assert_eq!(line_text(&wrapped.lines[0]), "  .:-=  ");
+        assert_eq!(line_text(&wrapped.lines[1]), "  =+*#  ");
+        assert_eq!(line_text(&wrapped.lines[2]), "  *#%@  ");
     }
 
     #[test]
