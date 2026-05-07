@@ -335,8 +335,17 @@ impl App {
 mod tests {
     use super::*;
     use crate::epub::{Block, BookId, Chapter, Span};
+    use crate::reader::DEFAULT_MAX_BODY_WIDTH;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    /// The body-width cap most tests pass to `App::new` — the default
+    /// from the renderer. Tests that want to verify a non-default cap
+    /// pass a different value (e.g. 100 in the custom-width tests).
+    /// Using the named constant rather than a bare `80` literal means
+    /// a future change to `DEFAULT_MAX_BODY_WIDTH` doesn't silently
+    /// drift these tests away from "the default-cap path."
+    const TEST_WIDTH: u16 = DEFAULT_MAX_BODY_WIDTH;
 
     fn book_with_chapters(chapters: Vec<Vec<Block>>) -> Book {
         let chs = chapters
@@ -392,7 +401,7 @@ mod tests {
     fn new_app_starts_at_chapter_zero_when_no_saved_position() {
         let (p_handle, _dir) = fresh_persistence();
         let book = book_with_chapters(vec![vec![p("hello")]]);
-        let app = App::new(book, p_handle, (80, 24), 80);
+        let app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         assert_eq!(app.chapter_idx(), 0);
         assert_eq!(app.line_offset(), 0);
     }
@@ -417,7 +426,7 @@ mod tests {
         }
         let p_handle = Persistence::open_at(path);
         let book = book_with_chapters(vec![vec![p("a")], vec![p("b")]]);
-        let app = App::new(book, p_handle, (80, 24), 80);
+        let app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         assert_eq!(app.chapter_idx(), 1);
     }
 
@@ -443,7 +452,7 @@ mod tests {
         }
         let p_handle = Persistence::open_at(path);
         let book = book_with_chapters(vec![vec![p("only one")]]);
-        let app = App::new(book, p_handle, (80, 24), 80);
+        let app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         assert_eq!(app.chapter_idx(), 0);
         assert_eq!(app.line_offset(), 0);
     }
@@ -470,7 +479,7 @@ mod tests {
         }
         let p_handle = Persistence::open_at(path);
         let book = book_with_chapters(vec![vec![p("short")]]);
-        let app = App::new(book, p_handle, (80, 24), 80);
+        let app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         // Wrapped chapter has at most a few lines; offset must be clamped
         // to wrapped.len()-1.
         assert!(app.line_offset() < app.wrapped().len().max(1));
@@ -482,7 +491,7 @@ mod tests {
         // rather than "Page 1 / 0" (the .max(1) floor on total_pages).
         let (p_handle, _dir) = fresh_persistence();
         let book = book_with_chapters(vec![vec![Block::Blank]]);
-        let app = App::new(book, p_handle, (80, 24), 80);
+        let app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         assert_eq!(app.page(), 1);
         assert_eq!(app.total_pages(), 1);
     }
@@ -493,7 +502,7 @@ mod tests {
         // Create a chapter with enough content to span 3+ wrapped lines.
         let blocks = vec![p("aaa bbb ccc"), p("ddd eee fff"), p("ggg hhh iii")];
         let book = book_with_chapters(vec![blocks]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         let start = app.line_offset();
         app.handle(Action::LineDown);
         assert_eq!(app.line_offset(), start + 1);
@@ -503,7 +512,7 @@ mod tests {
     fn line_down_at_chapter_end_advances_to_next_chapter() {
         let (p_handle, _dir) = fresh_persistence();
         let book = book_with_chapters(vec![vec![p("ch1")], vec![p("ch2")]]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         // Walk to the last line of chapter 0.
         while app.line_offset() + 1 < app.wrapped().len() {
             app.handle(Action::LineDown);
@@ -519,7 +528,7 @@ mod tests {
     fn line_down_at_last_line_of_last_chapter_is_noop() {
         let (p_handle, _dir) = fresh_persistence();
         let book = book_with_chapters(vec![vec![p("only")]]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         while app.line_offset() + 1 < app.wrapped().len() {
             app.handle(Action::LineDown);
         }
@@ -539,7 +548,7 @@ mod tests {
             romeo sierra tango uniform victor whiskey xray yankee zulu";
         let (p_handle, _dir) = fresh_persistence();
         let book = book_with_chapters(vec![vec![p(long)], vec![p("ch2")]]);
-        let mut app = App::new(book, p_handle, (40, 24), 80);
+        let mut app = App::new(book, p_handle, (40, 24), TEST_WIDTH);
         // The long first chapter must produce multiple wrapped lines
         // at width 40 (after 3-col left pad → 37 cols of body); 26
         // greek-alphabet words at ~6 cols each won't fit in one line.
@@ -567,7 +576,7 @@ mod tests {
     fn quit_sets_should_quit_flag() {
         let (p_handle, _dir) = fresh_persistence();
         let book = book_with_chapters(vec![vec![p("x")]]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         assert!(!app.should_quit());
         app.handle(Action::Quit);
         assert!(app.should_quit());
@@ -582,7 +591,7 @@ mod tests {
             blocks.push(p("the quick brown fox jumps over the lazy dog"));
         }
         let book = book_with_chapters(vec![blocks]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         let lines_per_page = 23;
         app.handle(Action::PageNext);
         assert_eq!(app.line_offset(), lines_per_page);
@@ -592,7 +601,7 @@ mod tests {
     fn page_next_past_chapter_end_advances_chapter() {
         let (p_handle, _dir) = fresh_persistence();
         let book = book_with_chapters(vec![vec![p("short")], vec![p("next")]]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         app.handle(Action::PageNext);
         assert_eq!(app.chapter_idx(), 1);
         assert_eq!(app.line_offset(), 0);
@@ -602,7 +611,7 @@ mod tests {
     fn page_prev_at_start_of_chapter_goes_to_previous_chapter() {
         let (p_handle, _dir) = fresh_persistence();
         let book = book_with_chapters(vec![vec![p("ch1")], vec![p("ch2")]]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         app.handle(Action::ChapterNext);
         assert_eq!(app.chapter_idx(), 1);
         app.handle(Action::PagePrev);
@@ -613,7 +622,7 @@ mod tests {
     fn chapter_next_loads_next_chapter() {
         let (p_handle, _dir) = fresh_persistence();
         let book = book_with_chapters(vec![vec![p("a")], vec![p("b")], vec![p("c")]]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         app.handle(Action::ChapterNext);
         assert_eq!(app.chapter_idx(), 1);
         app.handle(Action::ChapterNext);
@@ -627,7 +636,7 @@ mod tests {
         let (p_handle, _dir) = fresh_persistence();
         let blocks = vec![p("the quick brown fox jumps over the lazy dog")];
         let book = book_with_chapters(vec![blocks]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         let lines_at_80 = app.wrapped().len();
         app.handle(Action::Resize(40, 24));
         let lines_at_40 = app.wrapped().len();
@@ -650,7 +659,7 @@ mod tests {
             ));
         }
         let book = book_with_chapters(vec![blocks]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         // Scroll some distance from the top so the viewport isn't at line 0.
         for _ in 0..15 {
             app.handle(Action::PageNext);
@@ -683,7 +692,7 @@ mod tests {
         let (p_handle, _dir) = fresh_persistence();
         let blocks = vec![p("hello world")];
         let book = book_with_chapters(vec![blocks]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         let lines_before = app.wrapped().len();
         app.handle(Action::Resize(80, 50));
         let lines_after = app.wrapped().len();
@@ -698,7 +707,7 @@ mod tests {
             (vec![p_image("cover")], ChapterKind::FrontMatter),
             (vec![p_main("ch1")], ChapterKind::Main),
         ]);
-        let app = App::new(book, p_handle, (80, 24), 80);
+        let app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         assert_eq!(app.chapter_idx(), 0);
         assert!(app.main_chapter_position().is_none());
     }
@@ -712,7 +721,7 @@ mod tests {
             (vec![p_main("ch2")], ChapterKind::Main),
             (vec![p_main("ch3")], ChapterKind::Main),
         ]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         // Walk to chapter 1 (the first Main chapter).
         app.handle(Action::ChapterNext);
         assert_eq!(app.chapter_idx(), 1);
@@ -735,7 +744,7 @@ mod tests {
         }
         let book = book_with_chapters(vec![blocks]);
         let key = book.registry_key();
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         app.handle(Action::PageNext);
         // Re-open the persistence handle and verify the offset was saved
         // under the id-derived registry key (not the legacy path key).
@@ -770,7 +779,7 @@ mod tests {
         let book = book_with_chapters(vec![vec![p("a")], vec![p("b")]]);
         let new_id_key = book.registry_key();
         let legacy_key = book.path.to_string_lossy().into_owned();
-        let app = App::new(book, p_handle, (80, 24), 80);
+        let app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         assert_eq!(app.chapter_idx(), 1, "should restore from legacy path key");
 
         // Migration is durable: re-open the registry and confirm both
@@ -821,7 +830,7 @@ mod tests {
             p_handle.flush().unwrap();
         }
         let p_handle = Persistence::open_at(path);
-        let app = App::new(book, p_handle, (80, 24), 80);
+        let app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         assert_eq!(app.chapter_idx(), 2, "should prefer the id-keyed entry");
     }
 
@@ -830,7 +839,7 @@ mod tests {
         // Sanity: neither id-key nor legacy-key present → fresh start.
         let (p_handle, _dir) = fresh_persistence();
         let book = book_with_chapters(vec![vec![p("a")]]);
-        let app = App::new(book, p_handle, (80, 24), 80);
+        let app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         assert_eq!(app.chapter_idx(), 0);
         assert_eq!(app.line_offset(), 0);
     }
@@ -839,7 +848,7 @@ mod tests {
     fn toggle_help_flips_state() {
         let (p_handle, _dir) = fresh_persistence();
         let book = book_with_chapters(vec![vec![p("hi")]]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         assert!(!app.show_help(), "App starts with help hidden");
         app.handle(Action::ToggleHelp);
         assert!(app.show_help(), "ToggleHelp shows the overlay");
@@ -854,7 +863,7 @@ mod tests {
         // quits if they want to.
         let (p_handle, _dir) = fresh_persistence();
         let book = book_with_chapters(vec![vec![p("hi")]]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         app.handle(Action::ToggleHelp);
         assert!(app.show_help());
         app.handle(Action::Quit);
@@ -877,7 +886,7 @@ mod tests {
             blocks.push(p("the quick brown fox"));
         }
         let book = book_with_chapters(vec![blocks]);
-        let mut app = App::new(book, p_handle, (80, 24), 80);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
         assert!(app.save_error().is_none(), "fresh App has no save error");
         app.handle(Action::PageNext);
         assert!(
