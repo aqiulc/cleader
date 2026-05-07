@@ -106,7 +106,6 @@ fn event_loop(
                     entries,
                     selection: app.toc_selection(),
                     current_chapter: app.chapter_idx(),
-                    _phantom: std::marker::PhantomData,
                 })
             } else {
                 None

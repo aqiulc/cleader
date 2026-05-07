@@ -5,6 +5,12 @@ use crate::reader::{WrappedChapter, body_text_width, wrap_chapter};
 use chrono::Utc;
 use ratatui::text::Line;
 
+/// Maximum entries to advance per PgDn/PgUp in the TOC overlay. Prevents
+/// PgDn on a 50-row terminal from jumping ~50 chapters at once, which
+/// makes long TOCs hard to scan. Smaller than `lines_per_page` for
+/// coarse-grained nav.
+const TOC_PAGE_STEP_MAX: usize = 10;
+
 pub struct App {
     book: Book,
     chapter_idx: usize,
@@ -242,7 +248,7 @@ impl App {
                 Action::PageNext | Action::PagePrev => {
                     // Page-level nav also moves selection — covers
                     // long TOCs where line-by-line is tedious.
-                    let step = self.lines_per_page().min(10);
+                    let step = self.lines_per_page().min(TOC_PAGE_STEP_MAX);
                     if matches!(action, Action::PageNext) {
                         for _ in 0..step {
                             self.toc_select_next();
@@ -296,6 +302,10 @@ impl App {
                 self.show_help = !self.show_help;
             }
             Action::ToggleToc => {
+                // Dismiss help if it's up — the modes are mutually exclusive
+                // (renderer would prefer help over toc anyway, but the App
+                // state needs to reflect intent).
+                self.show_help = false;
                 self.show_toc = true;
                 // Start the TOC selection on whatever chapter the user
                 // is currently reading — most natural anchor.
@@ -1072,6 +1082,19 @@ mod tests {
         assert_eq!(app.chapter_idx(), 0, "should NOT have jumped");
         assert!(!app.show_toc());
         assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn opening_toc_dismisses_help_if_visible() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("ch1")], vec![p("ch2")]]);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
+        app.handle(Action::ToggleHelp);
+        assert!(app.show_help());
+        // Press t while help is up.
+        app.handle(Action::ToggleToc);
+        assert!(app.show_toc(), "TOC should be up");
+        assert!(!app.show_help(), "Help should have been dismissed");
     }
 
     #[test]

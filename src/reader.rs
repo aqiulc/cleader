@@ -324,17 +324,12 @@ pub struct RenderInput<'a> {
     /// listing every chapter) on top of the body and status bar. The
     /// help overlay wins when both are somehow set; the App is expected
     /// to keep them mutually exclusive.
-    pub toc: Option<TocOverlay<'a>>,
+    pub toc: Option<TocOverlay>,
 }
 
 /// Data the renderer needs to draw the TOC overlay. `None` (in
 /// `RenderInput::toc`) when the overlay is not visible.
-///
-/// The lifetime parameter is reserved for future use (e.g. borrowing
-/// chapter labels from the Book rather than cloning them) and is
-/// currently held by a PhantomData so the public type signature can
-/// stabilize before the implementation borrows.
-pub struct TocOverlay<'a> {
+pub struct TocOverlay {
     /// All chapter labels in order. Each entry is `(label, kind)`
     /// where label is what to display and kind distinguishes Main
     /// from FrontMatter for visual styling. Use `Chapter::title` with
@@ -347,8 +342,6 @@ pub struct TocOverlay<'a> {
     /// with a `▶` prefix so the user can see "where I am" vs "where
     /// would Enter take me."
     pub current_chapter: usize,
-    #[doc(hidden)]
-    pub _phantom: std::marker::PhantomData<&'a ()>,
 }
 
 /// The body's column cap when the user doesn't specify `--width`.
@@ -498,7 +491,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
 /// Mirrors `render_help_overlay`: `Clear` first to keep body text from
 /// bleeding through, modal sized to fit content but clamped to `area`
 /// so it never tries to draw outside the frame.
-fn render_toc_overlay(frame: &mut Frame, area: Rect, toc: &TocOverlay<'_>) {
+fn render_toc_overlay(frame: &mut Frame, area: Rect, toc: &TocOverlay) {
     // Modal sized to fit a reasonable number of entries on screen.
     let max_entry_width = toc
         .entries
@@ -1139,12 +1132,80 @@ mod tests {
                             ],
                             selection: 1,
                             current_chapter: 0,
-                            _phantom: std::marker::PhantomData,
                         }),
                     },
                 );
             })
             .unwrap();
+    }
+
+    #[test]
+    fn toc_overlay_does_not_panic_on_pathologically_narrow_terminal() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use crate::epub::ChapterKind;
+
+        let backend = TestBackend::new(4, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            let area = frame.area();
+            render(frame, area, RenderInput {
+                wrapped: &[],
+                line_offset: 0,
+                status: StatusInput {
+                    title: "x",
+                    chapter_display: None,
+                    page: 1,
+                    total_pages: 1,
+                    warning: None,
+                    width: area.width,
+                },
+                show_help: false,
+                max_body_width: DEFAULT_MAX_BODY_WIDTH,
+                toc: Some(TocOverlay {
+                    entries: vec![
+                        ("Cover".into(), ChapterKind::FrontMatter),
+                        ("Chapter 1: A Long Title".into(), ChapterKind::Main),
+                    ],
+                    selection: 1,
+                    current_chapter: 0,
+                }),
+            });
+        }).unwrap();
+    }
+
+    #[test]
+    fn toc_overlay_does_not_panic_on_short_terminal() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use crate::epub::ChapterKind;
+
+        let backend = TestBackend::new(40, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            let area = frame.area();
+            render(frame, area, RenderInput {
+                wrapped: &[],
+                line_offset: 0,
+                status: StatusInput {
+                    title: "x",
+                    chapter_display: None,
+                    page: 1,
+                    total_pages: 1,
+                    warning: None,
+                    width: area.width,
+                },
+                show_help: false,
+                max_body_width: DEFAULT_MAX_BODY_WIDTH,
+                toc: Some(TocOverlay {
+                    entries: (0..50)
+                        .map(|i| (format!("Chapter {i}"), ChapterKind::Main))
+                        .collect(),
+                    selection: 25,
+                    current_chapter: 10,
+                }),
+            });
+        }).unwrap();
     }
 
     #[test]
