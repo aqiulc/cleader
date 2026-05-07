@@ -44,6 +44,10 @@ Example:
 cleader ~/Books/Firefly_Generations.epub
 ```
 
+### Options
+
+- `-w`, `--width=N` — target body text width in columns (default 80).
+
 ### Key bindings
 
 | Action | Keys |

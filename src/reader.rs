@@ -318,7 +318,10 @@ pub struct RenderInput<'a> {
     pub show_help: bool,
 }
 
-const MAX_BODY_WIDTH: u16 = 80;
+/// The body's column cap when the user doesn't specify `--width`.
+/// Reading at >80 columns is fatiguing for most fiction; this is the
+/// industry-standard line-length sweet spot.
+pub const DEFAULT_MAX_BODY_WIDTH: u16 = 80;
 const BODY_LEFT_PAD: u16 = 3;
 
 /// Single source of truth for the help overlay's binding list. Kept
@@ -348,8 +351,8 @@ pub fn render(frame: &mut Frame, area: Rect, input: RenderInput<'_>) {
     let body_area = chunks[0];
     let status_area = chunks[1];
 
-    // Compute centered body column, capped at MAX_BODY_WIDTH.
-    let body_width = body_area.width.min(MAX_BODY_WIDTH);
+    // Compute centered body column, capped at DEFAULT_MAX_BODY_WIDTH.
+    let body_width = body_area.width.min(DEFAULT_MAX_BODY_WIDTH);
     let h_offset = (body_area.width - body_width) / 2;
     let body_rect = Rect {
         x: body_area.x + h_offset,
@@ -453,15 +456,16 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block), modal_area);
 }
 
-/// Width in columns the wrap step should target, given the terminal width.
+/// Width in columns the wrap step should target, given the terminal
+/// width and the user-configured body cap.
 ///
 /// Floored at 20 because narrower wrap targets produce one-word-per-line
-/// output that's worse than letting the renderer clip a wider wrap. On
-/// terminals narrower than ~24 cols the rendered output will be clipped;
-/// that's expected — cleader is not designed for sub-terminal widths.
-pub fn body_text_width(terminal_width: u16) -> u16 {
+/// output that's worse than letting the renderer clip a wider wrap. A
+/// user-passed `--width` value below ~24 will be silently bumped to the
+/// floor.
+pub fn body_text_width(terminal_width: u16, max_body_width: u16) -> u16 {
     terminal_width
-        .min(MAX_BODY_WIDTH)
+        .min(max_body_width)
         .saturating_sub(BODY_LEFT_PAD)
         .max(20)
 }
@@ -830,15 +834,28 @@ mod tests {
 
     #[test]
     fn body_text_width_caps_at_max() {
-        assert_eq!(body_text_width(200), MAX_BODY_WIDTH - BODY_LEFT_PAD);
-        assert_eq!(body_text_width(80), 80 - BODY_LEFT_PAD);
-        assert_eq!(body_text_width(40), 40 - BODY_LEFT_PAD);
+        assert_eq!(
+            body_text_width(200, DEFAULT_MAX_BODY_WIDTH),
+            DEFAULT_MAX_BODY_WIDTH - BODY_LEFT_PAD
+        );
+        assert_eq!(body_text_width(80, DEFAULT_MAX_BODY_WIDTH), 80 - BODY_LEFT_PAD);
+        assert_eq!(body_text_width(40, DEFAULT_MAX_BODY_WIDTH), 40 - BODY_LEFT_PAD);
     }
 
     #[test]
     fn body_text_width_floors_at_20() {
         // Tiny terminal.
-        assert_eq!(body_text_width(10), 20);
+        assert_eq!(body_text_width(10, DEFAULT_MAX_BODY_WIDTH), 20);
+    }
+
+    #[test]
+    fn body_text_width_respects_custom_cap() {
+        // User passes --width=120 on a 200-col terminal.
+        assert_eq!(body_text_width(200, 120), 120 - BODY_LEFT_PAD);
+        // User passes --width=120 on a 100-col terminal: terminal still wins.
+        assert_eq!(body_text_width(100, 120), 100 - BODY_LEFT_PAD);
+        // User passes --width=40 on a wide terminal: cap wins.
+        assert_eq!(body_text_width(200, 40), 40 - BODY_LEFT_PAD);
     }
 
     #[test]

@@ -21,6 +21,15 @@ use std::process::ExitCode;
 struct Cli {
     /// Path to an EPUB file to open.
     path: PathBuf,
+
+    /// Target body text width in columns. Defaults to 80, the
+    /// readability sweet spot for fiction. Useful on wide terminals
+    /// where 80 leaves too much whitespace, or on smaller windows
+    /// where you want the text to use more available space. Values
+    /// below 20 are silently clamped (the wrap algorithm needs at
+    /// least a few words per line to work well).
+    #[arg(short = 'w', long, default_value_t = cleader::reader::DEFAULT_MAX_BODY_WIDTH)]
+    width: u16,
 }
 
 fn main() -> ExitCode {
@@ -51,7 +60,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
     let mut terminal = setup_terminal()?;
     let viewport = terminal.size().map(|s| (s.width, s.height))?;
-    let mut app = App::new(book, persistence, viewport);
+    let mut app = App::new(book, persistence, viewport, cli.width);
 
     let result = event_loop(&mut terminal, &mut app);
     restore_terminal()?;
