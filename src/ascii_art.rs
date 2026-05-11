@@ -9,18 +9,17 @@
 
 use image::imageops::FilterType;
 
-/// Brightness ramp from "no ink" to "full ink." 5-level Unicode block-
-/// shade ramp produces cleaner cover art than the older 10-char ASCII
-/// ramp because adjacent levels visually blend rather than producing
-/// the high-density-character speckle ASCII ramps suffered from on
-/// Lanczos-resampled photos and stylized cover text.
+/// Brightness ramp from "no ink" to "full ink." 5-level ASCII ramp with
+/// each character visually distinct from its neighbors — so Lanczos-
+/// smoothed mid-tone gradients can't produce speckle of look-alike
+/// characters the way the older 10-char ramp did.
 ///
-/// All five characters are single-cell wide (verified across xterm,
-/// kitty, alacritty, wezterm, iTerm2, Windows Terminal, gnome-terminal,
-/// tmux passthrough). On terminals without Unicode block-element
-/// support the characters degrade to '?'; consider a CLI flag for an
-/// ASCII fallback if real users hit this.
-const ASCII_GRADIENT: &[char] = &[' ', '░', '▒', '▓', '█'];
+/// Tried Unicode block elements (` ░▒▓█`) briefly — they made covers
+/// look like blurry low-res photos rather than ASCII art. The point of
+/// rendering covers in a terminal is that they look like character art,
+/// not that they approximate a continuous-tone image. Keep the ASCII
+/// character feel; use distinct glyphs to fight mud.
+const ASCII_GRADIENT: &[char] = &[' ', '.', '+', '#', '@'];
 
 /// Defensive upper bound on rendered ASCII-art row count. Real book
 /// covers are roughly 1:1.5 aspect — at width 60 that's 45 rows; at
@@ -168,10 +167,12 @@ mod tests {
     }
 
     #[test]
-    fn gradient_is_block_element_ramp() {
-        // Locks in the v0.4.3 choice. If a future change to the ramp
+    fn gradient_is_distinct_ascii_ramp() {
+        // Locks in the v0.4.3a choice. If a future change to the ramp
         // breaks the contract, this test fails loudly and the change
-        // has to be deliberate.
-        assert_eq!(ASCII_GRADIENT, &[' ', '░', '▒', '▓', '█']);
+        // has to be deliberate. Each character is visually distinct
+        // from its neighbors so Lanczos-smoothed mid-tones don't
+        // produce look-alike speckle.
+        assert_eq!(ASCII_GRADIENT, &[' ', '.', '+', '#', '@']);
     }
 }
