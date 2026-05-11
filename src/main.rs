@@ -19,7 +19,9 @@ use std::process::ExitCode;
 #[derive(Parser, Debug)]
 #[command(name = "cleader", version, about, long_about = None)]
 struct Cli {
-    /// Path to an EPUB file to open.
+    /// Path to an EPUB file, or a directory containing EPUBs. When a
+    /// directory is given, cleader shows a library list view where you
+    /// can pick a book to read.
     path: PathBuf,
 
     /// Target body text width in columns. Defaults to 80, the
@@ -55,7 +57,20 @@ fn install_panic_hook() {
 }
 
 fn run(cli: Cli) -> anyhow::Result<()> {
-    let book = Book::open(&cli.path, cli.width)?;
+    // If the user passed a directory, run the Library app first.
+    // It returns Some(path) on a book selection, None if the user quit
+    // without choosing. Either way, terminal state is restored before
+    // we proceed.
+    let book_path = if cli.path.is_dir() {
+        match run_library(&cli.path)? {
+            Some(p) => p,
+            None => return Ok(()),
+        }
+    } else {
+        cli.path.clone()
+    };
+
+    let book = Book::open(&book_path, cli.width)?;
     let persistence = Persistence::open()?;
 
     let mut terminal = setup_terminal()?;
@@ -65,6 +80,23 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let result = event_loop(&mut terminal, &mut app);
     restore_terminal()?;
     result
+}
+
+fn run_library(dir: &std::path::Path) -> anyhow::Result<Option<PathBuf>> {
+    let entries = cleader::library::scan_directory(dir)?;
+    if entries.is_empty() {
+        return Err(anyhow::anyhow!("no EPUBs found in {}", dir.display()));
+    }
+
+    let mut terminal = setup_terminal()?;
+    let viewport = terminal.size().map(|s| (s.width, s.height))?;
+    let mut library_app = cleader::library_app::LibraryApp::new(entries, viewport);
+
+    let loop_result = library_event_loop(&mut terminal, &mut library_app);
+    restore_terminal()?;
+    loop_result?;
+
+    Ok(library_app.selected_path().map(|p| p.to_path_buf()))
 }
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
@@ -127,6 +159,30 @@ fn event_loop(
                     show_help: app.show_help(),
                     max_body_width: app.max_body_width(),
                     toc,
+                },
+            );
+        })?;
+        let evt = event::read()?;
+        if let Some(action) = translate(evt) {
+            app.handle(action);
+        }
+    }
+    Ok(())
+}
+
+fn library_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut cleader::library_app::LibraryApp,
+) -> anyhow::Result<()> {
+    while !app.should_quit() {
+        terminal.draw(|frame| {
+            let area = frame.area();
+            cleader::reader::render_library(
+                frame,
+                area,
+                cleader::reader::LibraryRenderInput {
+                    entries: app.entries(),
+                    selection: app.selection(),
                 },
             );
         })?;

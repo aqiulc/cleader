@@ -638,6 +638,77 @@ pub fn body_text_width(terminal_width: u16, max_body_width: u16) -> u16 {
         .max(20)
 }
 
+pub struct LibraryRenderInput<'a> {
+    pub entries: &'a [crate::library::LibraryEntry],
+    pub selection: usize,
+}
+
+pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'_>) {
+    // Layout: title bar (1 row), list (rest), footer (1 row).
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    // Title bar.
+    let title = TuiSpan::styled(
+        format!(" cleader library — {} book(s) ", input.entries.len()),
+        Style::default().add_modifier(Modifier::BOLD),
+    );
+    frame.render_widget(Paragraph::new(Line::from(title)), chunks[0]);
+
+    // List body: render entries with selection highlight + scroll.
+    let visible_rows = chunks[1].height as usize;
+    let scroll = library_scroll_for(input.selection, input.entries.len(), visible_rows);
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible_rows);
+    for (rel, abs) in (scroll..(scroll + visible_rows).min(input.entries.len())).enumerate() {
+        let entry = &input.entries[abs];
+        let is_selected = abs == input.selection;
+        let style = if is_selected {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        let label = format!(
+            "  {:>3}. {}  —  {}",
+            abs + 1,
+            entry.title,
+            entry.author
+        );
+        lines.push(Line::from(TuiSpan::styled(label, style)));
+        let _ = rel;
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(TuiBlock::default().borders(Borders::NONE)),
+        chunks[1],
+    );
+
+    // Footer hint.
+    let footer = TuiSpan::styled(
+        " Enter open · ↑↓ navigate · q quit ",
+        Style::default().add_modifier(Modifier::DIM),
+    );
+    frame.render_widget(Paragraph::new(Line::from(footer)), chunks[2]);
+}
+
+/// Scroll so `selection` stays visible. Reuse-friendly with the TOC
+/// overlay's compute_toc_scroll logic, but the library list is full-
+/// screen so the visible window can be much larger.
+fn library_scroll_for(selection: usize, total: usize, visible: usize) -> usize {
+    if total <= visible {
+        return 0;
+    }
+    if selection < visible / 2 {
+        return 0;
+    }
+    let max_scroll = total.saturating_sub(visible);
+    selection.saturating_sub(visible / 2).min(max_scroll)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1312,5 +1383,35 @@ mod tests {
         assert_eq!(compute_toc_scroll(99, 100, 10), 90);
         // Total fits in window: no scroll.
         assert_eq!(compute_toc_scroll(5, 8, 10), 0);
+    }
+
+    #[test]
+    fn library_render_does_not_panic_on_narrow_terminal() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use crate::library::LibraryEntry;
+        let backend = TestBackend::new(10, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            let area = frame.area();
+            render_library(frame, area, LibraryRenderInput {
+                entries: &[
+                    LibraryEntry {
+                        path: std::path::PathBuf::from("/a.epub"),
+                        title: "A".into(),
+                        author: "X".into(),
+                    },
+                ],
+                selection: 0,
+            });
+        }).unwrap();
+    }
+
+    #[test]
+    fn library_scroll_for_keeps_selection_in_view() {
+        assert_eq!(library_scroll_for(0, 100, 10), 0);
+        assert_eq!(library_scroll_for(50, 100, 10), 45);
+        assert_eq!(library_scroll_for(99, 100, 10), 90);
+        assert_eq!(library_scroll_for(5, 8, 10), 0);
     }
 }
