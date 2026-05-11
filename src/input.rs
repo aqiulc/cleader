@@ -11,6 +11,7 @@ pub enum Action {
     ChapterPrev,
     ToggleHelp,
     ToggleToc,
+    ToggleViewMode,
     Confirm,
     Quit,
     Resize(u16, u16),
@@ -54,6 +55,7 @@ fn translate_key(key: KeyEvent) -> Option<Action> {
         (Char('?'), false, _) => Some(Action::ToggleHelp),
 
         (Char('t'), false, false) => Some(Action::ToggleToc),
+        (Char('g'), false, false) => Some(Action::ToggleViewMode),
         (Enter, _, _) => Some(Action::Confirm),
 
         _ => None,
@@ -154,5 +156,13 @@ mod tests {
         assert_eq!(translate(key(KeyCode::Char('x'))), None);
         assert_eq!(translate(key(KeyCode::F(1))), None);
         assert_eq!(translate(key(KeyCode::Tab)), None);
+    }
+
+    #[test]
+    fn g_toggles_view_mode() {
+        assert_eq!(
+            translate(key(KeyCode::Char('g'))),
+            Some(Action::ToggleViewMode)
+        );
     }
 }

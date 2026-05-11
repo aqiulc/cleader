@@ -105,7 +105,8 @@ impl LibraryApp {
             Action::ChapterNext
             | Action::ChapterPrev
             | Action::ToggleHelp
-            | Action::ToggleToc => {}
+            | Action::ToggleToc
+            | Action::ToggleViewMode => {}
         }
     }
 

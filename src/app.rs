@@ -270,7 +270,7 @@ impl App {
                 }
                 Action::Quit => self.show_toc = false,
                 Action::Resize(w, h) => self.resize(w, h),
-                Action::ChapterNext | Action::ChapterPrev => {
+                Action::ChapterNext | Action::ChapterPrev | Action::ToggleViewMode => {
                     // Chapter nav while TOC is up is ambiguous — the user
                     // probably wanted TOC selection nav. Treat as no-op.
                 }
@@ -314,6 +314,9 @@ impl App {
             Action::Confirm => {
                 // No-op outside of overlay context for now. Future
                 // features may bind it elsewhere.
+            }
+            Action::ToggleViewMode => {
+                // No-op in reader mode; library mode handles this in Task 5.
             }
             Action::Quit => {
                 if self.show_help {
