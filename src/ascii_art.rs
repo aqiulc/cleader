@@ -9,11 +9,18 @@
 
 use image::imageops::FilterType;
 
-/// Brightness gradient from "darkest pixel" to "lightest pixel."
-/// Standard ASCII-art ramp; first char is space (no ink), last is
-/// a full block (maximum ink). The user's terminal foreground color
-/// determines the actual ink color.
-const ASCII_GRADIENT: &[u8] = b" .:-=+*#%@";
+/// Brightness ramp from "no ink" to "full ink." 5-level Unicode block-
+/// shade ramp produces cleaner cover art than the older 10-char ASCII
+/// ramp because adjacent levels visually blend rather than producing
+/// the high-density-character speckle ASCII ramps suffered from on
+/// Lanczos-resampled photos and stylized cover text.
+///
+/// All five characters are single-cell wide (verified across xterm,
+/// kitty, alacritty, wezterm, iTerm2, Windows Terminal, gnome-terminal,
+/// tmux passthrough). On terminals without Unicode block-element
+/// support the characters degrade to '?'; consider a CLI flag for an
+/// ASCII fallback if real users hit this.
+const ASCII_GRADIENT: &[char] = &[' ', '░', '▒', '▓', '█'];
 
 /// Defensive upper bound on rendered ASCII-art row count. Real book
 /// covers are roughly 1:1.5 aspect — at width 60 that's 45 rows; at
@@ -61,7 +68,7 @@ pub fn image_to_ascii(
             let pixel = resized.get_pixel(x, y);
             let brightness = pixel[0] as usize;
             let idx = (brightness * (ASCII_GRADIENT.len() - 1)) / 255;
-            line.push(ASCII_GRADIENT[idx] as char);
+            line.push(ASCII_GRADIENT[idx]);
         }
         lines.push(line);
     }
@@ -88,7 +95,7 @@ mod tests {
         let bytes = solid_png(20, 10, 255);
         let lines = image_to_ascii(&bytes, 10).unwrap();
         assert!(!lines.is_empty());
-        let last_char = ASCII_GRADIENT[ASCII_GRADIENT.len() - 1] as char;
+        let last_char = ASCII_GRADIENT[ASCII_GRADIENT.len() - 1];
         for line in &lines {
             for ch in line.chars() {
                 assert_eq!(ch, last_char, "white pixel should map to last gradient char");
@@ -100,7 +107,7 @@ mod tests {
     fn solid_black_image_produces_min_ink_gradient_char() {
         let bytes = solid_png(20, 10, 0);
         let lines = image_to_ascii(&bytes, 10).unwrap();
-        let first_char = ASCII_GRADIENT[0] as char;
+        let first_char = ASCII_GRADIENT[0];
         for line in &lines {
             for ch in line.chars() {
                 assert_eq!(ch, first_char, "black pixel should map to first gradient char (space)");
@@ -158,5 +165,13 @@ mod tests {
         let bytes = solid_png(1, 10000, 128);
         let lines = image_to_ascii(&bytes, 10).unwrap();
         assert!(lines.len() <= MAX_TARGET_HEIGHT as usize);
+    }
+
+    #[test]
+    fn gradient_is_block_element_ramp() {
+        // Locks in the v0.4.3 choice. If a future change to the ramp
+        // breaks the contract, this test fails loudly and the change
+        // has to be deliberate.
+        assert_eq!(ASCII_GRADIENT, &[' ', '░', '▒', '▓', '█']);
     }
 }
