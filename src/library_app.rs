@@ -52,6 +52,22 @@ impl LibraryApp {
         self.selected_path.as_deref()
     }
 
+    /// Reset the "user selected and confirmed" state so the app can be
+    /// re-entered for another selection. Preserves `entries` and
+    /// `selection` so the user lands back on whichever book they just
+    /// finished reading; reading position state is owned by Persistence
+    /// (not by LibraryApp).
+    pub fn reset_for_reselection(&mut self) {
+        self.should_quit = false;
+        self.selected_path = None;
+    }
+
+    /// Update the viewport size, e.g. after returning from the reader
+    /// session where the terminal might have been resized.
+    pub fn set_viewport(&mut self, viewport: (u16, u16)) {
+        self.viewport_size = viewport;
+    }
+
     pub fn handle(&mut self, action: Action) {
         match action {
             Action::LineUp => {
@@ -174,5 +190,35 @@ mod tests {
         let mut app = LibraryApp::new(entries, (80, 24));
         app.handle(Action::PageNext);
         assert_eq!(app.selection(), 10);
+    }
+
+    #[test]
+    fn reset_for_reselection_clears_completion_state() {
+        let mut app = LibraryApp::new(
+            vec![entry("A"), entry("B"), entry("C")],
+            (80, 24),
+        );
+        app.handle(Action::LineDown);
+        app.handle(Action::Confirm);
+        assert!(app.should_quit());
+        assert!(app.selected_path().is_some());
+        let saved_selection = app.selection();
+
+        app.reset_for_reselection();
+        assert!(!app.should_quit(), "should_quit must be cleared");
+        assert!(app.selected_path().is_none(), "selected_path must be cleared");
+        assert_eq!(
+            app.selection(),
+            saved_selection,
+            "selection must be preserved"
+        );
+    }
+
+    #[test]
+    fn set_viewport_updates_viewport_size() {
+        let mut app = LibraryApp::new(vec![entry("A")], (80, 24));
+        assert_eq!(app.viewport_size(), (80, 24));
+        app.set_viewport((100, 30));
+        assert_eq!(app.viewport_size(), (100, 30));
     }
 }

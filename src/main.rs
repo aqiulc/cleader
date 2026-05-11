@@ -57,32 +57,33 @@ fn install_panic_hook() {
 }
 
 fn run(cli: Cli) -> anyhow::Result<()> {
-    // If the user passed a directory, run the Library app first.
-    // It returns Some(path) on a book selection, None if the user quit
-    // without choosing. Either way, terminal state is restored before
-    // we proceed.
-    let book_path = if cli.path.is_dir() {
-        match run_library(&cli.path)? {
-            Some(p) => p,
-            None => return Ok(()),
-        }
+    if cli.path.is_dir() {
+        run_library_session(&cli.path, cli.width)
     } else {
-        cli.path.clone()
-    };
+        run_single_book_session(&cli.path, cli.width)
+    }
+}
 
-    let book = Book::open(&book_path, cli.width)?;
+fn run_single_book_session(
+    path: &std::path::Path,
+    max_body_width: u16,
+) -> anyhow::Result<()> {
+    let book = Book::open(path, max_body_width)?;
     let persistence = Persistence::open()?;
 
     let mut terminal = setup_terminal()?;
     let viewport = terminal.size().map(|s| (s.width, s.height))?;
-    let mut app = App::new(book, persistence, viewport, cli.width);
+    let mut app = App::new(book, persistence, viewport, max_body_width);
 
     let result = event_loop(&mut terminal, &mut app);
     restore_terminal()?;
     result
 }
 
-fn run_library(dir: &std::path::Path) -> anyhow::Result<Option<PathBuf>> {
+fn run_library_session(
+    dir: &std::path::Path,
+    max_body_width: u16,
+) -> anyhow::Result<()> {
     let entries = cleader::library::scan_directory(dir)?;
     if entries.is_empty() {
         return Err(anyhow::anyhow!(
@@ -95,11 +96,47 @@ fn run_library(dir: &std::path::Path) -> anyhow::Result<Option<PathBuf>> {
     let viewport = terminal.size().map(|s| (s.width, s.height))?;
     let mut library_app = cleader::library_app::LibraryApp::new(entries, viewport);
 
-    let loop_result = library_event_loop(&mut terminal, &mut library_app);
-    restore_terminal()?;
-    loop_result?;
+    let outcome: anyhow::Result<()> = loop {
+        // Run library until selection or quit.
+        if let Err(e) = library_event_loop(&mut terminal, &mut library_app) {
+            break Err(e);
+        }
 
-    Ok(library_app.selected_path().map(|p| p.to_path_buf()))
+        // No selection -> user quit out of library mode entirely.
+        let Some(book_path) = library_app.selected_path() else {
+            break Ok(());
+        };
+        let book_path = book_path.to_path_buf();
+
+        // Open the book and run the reader.
+        let book = match Book::open(&book_path, max_body_width) {
+            Ok(b) => b,
+            Err(e) => break Err(e.into()),
+        };
+        let persistence = match Persistence::open() {
+            Ok(p) => p,
+            Err(e) => break Err(e.into()),
+        };
+        let viewport = match terminal.size() {
+            Ok(s) => (s.width, s.height),
+            Err(e) => break Err(e.into()),
+        };
+        let mut app = App::new(book, persistence, viewport, max_body_width);
+        if let Err(e) = event_loop(&mut terminal, &mut app) {
+            break Err(e);
+        }
+
+        // Reader exited. Update library viewport (terminal may have been
+        // resized during the reader session) and clear the should_quit
+        // and selected_path flags so the next iteration starts fresh.
+        if let Ok(s) = terminal.size() {
+            library_app.set_viewport((s.width, s.height));
+        }
+        library_app.reset_for_reselection();
+    };
+
+    restore_terminal()?;
+    outcome
 }
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
