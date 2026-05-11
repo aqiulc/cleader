@@ -113,16 +113,39 @@ impl std::fmt::Display for BookId {
     }
 }
 
-/// Convert a chapter's XHTML body into a `Vec<Block>`.
-pub fn html_to_blocks(xhtml: &str) -> Vec<Block> {
+/// Walk a chapter's XHTML body into `Vec<Block>`, with an optional
+/// image resolver that converts `<img src="...">` to `Block::Image`
+/// when it returns `Some(lines)`. When the resolver returns `None`,
+/// falls back to the `[image: alt]` placeholder paragraph used by
+/// `html_to_blocks`.
+///
+/// The resolver receives the raw `src` attribute value (relative to
+/// the chapter). Callers (typically `Book::open`) resolve paths,
+/// fetch bytes, and run `ascii_art::image_to_ascii` before populating
+/// the lookup table.
+pub fn html_to_blocks_with_images<F>(xhtml: &str, resolver: F) -> Vec<Block>
+where
+    F: Fn(&str) -> Option<Vec<String>>,
+{
     let doc = Html::parse_document(xhtml);
     let root = doc.root_element();
     let mut out = Vec::new();
-    walk_block_level(&root, &mut out);
+    walk_block_level_with_resolver(&root, &mut out, &resolver);
     out
 }
 
-fn walk_block_level(el: &ElementRef, out: &mut Vec<Block>) {
+/// Convert a chapter's XHTML body into a `Vec<Block>`. All `<img>`
+/// elements become `[image: alt]` placeholders — no image resolution.
+/// Used by tests and callers that don't have access to image bytes.
+pub fn html_to_blocks(xhtml: &str) -> Vec<Block> {
+    html_to_blocks_with_images(xhtml, |_| None)
+}
+
+fn walk_block_level_with_resolver(
+    el: &ElementRef,
+    out: &mut Vec<Block>,
+    resolver: &dyn Fn(&str) -> Option<Vec<String>>,
+) {
     for child in el.children() {
         if let Node::Element(e) = child.value() {
             let Some(child_el) = ElementRef::wrap(child) else { continue };
@@ -166,7 +189,16 @@ fn walk_block_level(el: &ElementRef, out: &mut Vec<Block>) {
                     });
                 }
                 "img" => {
+                    let src = child_el.value().attr("src").unwrap_or("").trim();
                     let alt = child_el.value().attr("alt").unwrap_or("").trim();
+                    // Try the resolver first; fall back to the [image: alt]
+                    // placeholder when the resolver has nothing.
+                    if !src.is_empty() {
+                        if let Some(ascii) = resolver(src) {
+                            out.push(Block::Image(ascii));
+                            continue;
+                        }
+                    }
                     if !alt.is_empty() {
                         out.push(Block::Paragraph {
                             spans: vec![Span::plain(format!("[image: {alt}]"))],
@@ -182,10 +214,60 @@ fn walk_block_level(el: &ElementRef, out: &mut Vec<Block>) {
                     // it ever matters.
                     out.push(Block::Blank);
                 }
-                _ => walk_block_level(&child_el, out),
+                _ => walk_block_level_with_resolver(&child_el, out, resolver),
             }
         }
     }
+}
+
+/// Scan an XHTML body for every `<img src>` value, in document order.
+/// Used by `Book::open`'s first pass to know which image resources to
+/// fetch and ASCII-render before walking the chapter into blocks.
+/// Empty/whitespace-only `src` values are skipped.
+fn collect_img_srcs(xhtml: &str) -> Vec<String> {
+    let doc = Html::parse_document(xhtml);
+    let selector = scraper::Selector::parse("img").expect("static selector parses");
+    doc.select(&selector)
+        .filter_map(|el| el.value().attr("src").map(str::to_owned))
+        .filter(|src| !src.trim().is_empty())
+        .collect()
+}
+
+/// Resolve an `<img src>` into a path that can be looked up in the
+/// EPUB archive via `EpubDoc::get_resource_by_path`.
+///
+/// EPUB image srcs are relative to the chapter's XHTML location. So
+/// a chapter at `OEBPS/text/chapter1.xhtml` with `src="../images/fig.png"`
+/// resolves to `OEBPS/images/fig.png`. When the chapter path is `None`
+/// (rare — broken EPUB), we fall back to the raw src.
+fn resolve_image_path(chapter_path: Option<&Path>, src: &str) -> PathBuf {
+    match chapter_path {
+        Some(ch) => {
+            let parent = ch.parent().unwrap_or_else(|| Path::new(""));
+            normalize_path(&parent.join(src))
+        }
+        None => PathBuf::from(src),
+    }
+}
+
+/// Resolve `..` and `.` components in a path without touching the
+/// filesystem. EPUB references like `../images/fig.png` need this
+/// flattened form before the archive lookup will succeed.
+fn normalize_path(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in p.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                out.push(component.as_os_str());
+            }
+        }
+    }
+    out
 }
 
 /// Trim leading whitespace from the first span and trailing whitespace from
@@ -435,16 +517,17 @@ impl Book {
 
     /// Open and parse an EPUB.
     ///
-    /// `cover_target_width` controls the column width used when
-    /// rendering the cover image as ASCII art. Use
+    /// `image_target_width` controls the column width used when
+    /// rendering image assets (cover + any inline illustrations,
+    /// scene-break ornaments, embedded maps, etc.) as ASCII art. Use
     /// `cleader::reader::DEFAULT_MAX_BODY_WIDTH` if you have no
     /// preference (matches the App's default body width). The
     /// previous v0.3.2 form hard-coded a width of 60; callers must
-    /// now pass an explicit value so the cover matches the user's
+    /// now pass an explicit value so images match the user's
     /// configured `--width`.
     pub fn open(
         path: impl AsRef<Path>,
-        cover_target_width: u16,
+        image_target_width: u16,
     ) -> Result<Self, EpubError> {
         let path = path.as_ref();
         if !path.exists() {
@@ -471,13 +554,41 @@ impl Book {
             .unwrap_or_else(|| "Unknown".into());
 
         // First pass: collect every non-empty spine item as (path, blocks).
-        // Silent skip on get_current_str() == None: a single corrupt spine
-        // item shouldn't kill a 30-chapter book.
+        // For each chapter, scan its XHTML for <img src> values, resolve
+        // each src to a path inside the EPUB, fetch the bytes, and ASCII-
+        // render at `image_target_width`. Failed resolutions (missing
+        // resource, decode error) are silently skipped — the src stays as
+        // a [image: alt] placeholder. Silent skip on get_current_str() ==
+        // None: a single corrupt spine item shouldn't kill a 30-chapter
+        // book.
         let mut all: Vec<(PathBuf, Vec<Block>)> = Vec::new();
         loop {
             let current_path = doc.get_current_path();
             if let Some((content, _mime)) = doc.get_current_str() {
-                let blocks = html_to_blocks(&content);
+                // First sub-pass: collect <img src> values from this chapter.
+                let img_srcs = collect_img_srcs(&content);
+
+                // Resolve each src, fetch bytes, ASCII-render. Failed
+                // resolutions just don't end up in the map.
+                let mut ascii_for_src: HashMap<String, Vec<String>> =
+                    HashMap::new();
+                for src in img_srcs {
+                    let resolved =
+                        resolve_image_path(current_path.as_deref(), &src);
+                    if let Some(bytes) = doc.get_resource_by_path(&resolved) {
+                        if let Ok(ascii) = crate::ascii_art::image_to_ascii(
+                            &bytes,
+                            image_target_width,
+                        ) {
+                            ascii_for_src.insert(src, ascii);
+                        }
+                    }
+                }
+
+                // Second sub-pass: walk the HTML with image resolution.
+                let blocks = html_to_blocks_with_images(&content, |src| {
+                    ascii_for_src.get(src).cloned()
+                });
                 if !blocks.is_empty() {
                     if let Some(p) = current_path {
                         all.push((p, blocks));
@@ -533,7 +644,7 @@ impl Book {
         // floating in a 120-col body reads like a bug.
         let mut chapters = chapters;
         if let Some((cover_bytes, _mime)) = doc.get_cover() {
-            if let Ok(ascii) = crate::ascii_art::image_to_ascii(&cover_bytes, cover_target_width) {
+            if let Ok(ascii) = crate::ascii_art::image_to_ascii(&cover_bytes, image_target_width) {
                 for ch in chapters.iter_mut() {
                     if matches!(ch.kind, ChapterKind::FrontMatter) {
                         ch.blocks = vec![Block::Image(ascii)];
@@ -961,6 +1072,92 @@ mod tests {
     fn book_id_display_matches_as_str() {
         let id = BookId::from_bytes(b"x");
         assert_eq!(format!("{id}"), id.as_str());
+    }
+
+    #[test]
+    fn html_to_blocks_with_images_uses_resolver_when_present() {
+        let xhtml = r#"<html><body><p>before</p><img src="fig.png" alt="figure"/><p>after</p></body></html>"#;
+        let blocks = html_to_blocks_with_images(xhtml, |src| {
+            if src == "fig.png" {
+                Some(vec!["##".to_string(), "##".to_string()])
+            } else {
+                None
+            }
+        });
+        // Expect: paragraph "before", Block::Image, paragraph "after".
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(blocks[0], Block::Paragraph { .. }));
+        assert!(matches!(blocks[1], Block::Image(_)));
+        assert!(matches!(blocks[2], Block::Paragraph { .. }));
+    }
+
+    #[test]
+    fn html_to_blocks_with_images_falls_back_to_placeholder_when_resolver_returns_none() {
+        let xhtml = r#"<html><body><img src="missing.png" alt="missing"/></body></html>"#;
+        let blocks = html_to_blocks_with_images(xhtml, |_| None);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            Block::Paragraph { spans } => {
+                assert_eq!(spans[0].text, "[image: missing]");
+            }
+            _ => panic!("expected placeholder paragraph"),
+        }
+    }
+
+    #[test]
+    fn html_to_blocks_with_images_handles_img_without_src() {
+        let xhtml = r#"<html><body><img alt="x"/></body></html>"#;
+        let blocks = html_to_blocks_with_images(xhtml, |_| Some(vec!["#".into()]));
+        // No src → no resolver call → fall through to placeholder.
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0], Block::Paragraph { .. }));
+    }
+
+    #[test]
+    fn normalize_path_resolves_parent_components() {
+        assert_eq!(
+            normalize_path(Path::new("OEBPS/text/../images/fig.png")),
+            PathBuf::from("OEBPS/images/fig.png")
+        );
+        assert_eq!(
+            normalize_path(Path::new("./foo/./bar.png")),
+            PathBuf::from("foo/bar.png")
+        );
+    }
+
+    #[test]
+    fn resolve_image_path_handles_relative_src() {
+        let chapter = PathBuf::from("OEBPS/text/chapter1.xhtml");
+        assert_eq!(
+            resolve_image_path(Some(&chapter), "../images/fig.png"),
+            PathBuf::from("OEBPS/images/fig.png")
+        );
+        assert_eq!(
+            resolve_image_path(Some(&chapter), "fig.png"),
+            PathBuf::from("OEBPS/text/fig.png")
+        );
+    }
+
+    #[test]
+    fn resolve_image_path_no_chapter_uses_src_as_is() {
+        assert_eq!(
+            resolve_image_path(None, "images/fig.png"),
+            PathBuf::from("images/fig.png")
+        );
+    }
+
+    #[test]
+    fn collect_img_srcs_extracts_src_attributes() {
+        let xhtml = r#"<html><body><img src="a.png"/><p>x</p><img src="b.png"/></body></html>"#;
+        let srcs = collect_img_srcs(xhtml);
+        assert_eq!(srcs, vec!["a.png".to_string(), "b.png".to_string()]);
+    }
+
+    #[test]
+    fn collect_img_srcs_skips_empty_src() {
+        let xhtml = r#"<html><body><img src=""/><img/><img src="ok.png"/></body></html>"#;
+        let srcs = collect_img_srcs(xhtml);
+        assert_eq!(srcs, vec!["ok.png".to_string()]);
     }
 
     #[test]

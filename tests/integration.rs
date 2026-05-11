@@ -164,6 +164,31 @@ fn threshold_cover_is_rendered_as_ascii_art() {
     );
 }
 
+#[test]
+fn books_with_inline_images_render_them_as_ascii_art() {
+    use cleader::epub::{Block, ChapterKind};
+    let Some(path) = require_book(None) else { return; };
+    let book = Book::open(&path, cleader::reader::DEFAULT_MAX_BODY_WIDTH).unwrap();
+
+    // Count Block::Image inside Main chapters (not the cover).
+    let main_image_count: usize = book
+        .chapters
+        .iter()
+        .filter(|c| matches!(c.kind, ChapterKind::Main))
+        .flat_map(|c| c.blocks.iter())
+        .filter(|b| matches!(b, Block::Image(_)))
+        .count();
+
+    // Don't assert non-zero — books may or may not have inline images.
+    // The point of this test is: if ANY are present, the pipeline didn't
+    // crash and the variant is reachable end-to-end. A `cargo test --
+    // --nocapture` run shows the count.
+    eprintln!(
+        "integration: {main_image_count} inline images in {:?}",
+        path.file_name().unwrap()
+    );
+}
+
 /// End-to-end pipeline: load a real EPUB → wrap a real chapter → verify
 /// the wrap output is non-empty and respects the width contract. The
 /// existing reader unit tests use synthetic blocks; this proves the full

@@ -100,15 +100,24 @@ pub fn wrap_chapter(blocks: &[Block], width: u16) -> WrappedChapter {
             Block::Image(ascii_lines) => {
                 // Pre-rendered ASCII art: emit each line as-is.
                 // No wrapping, no styling; the renderer handles clipping.
+                //
+                // Inline images contribute 0 to chapter_offset — the image
+                // has no character footprint in the chapter's prose flow,
+                // so subsequent paragraphs' source offsets stay correct
+                // for smart-resize position tracking. All emitted lines
+                // (including the trailing blank) share the same
+                // source_offset, so smart-resize lands the user at the
+                // image's start (the middle of an image isn't a
+                // meaningful resume point).
+                let image_offset = chapter_offset;
                 for art_line in ascii_lines {
-                    let line_chars = art_line.chars().count();
                     lines.push(Line::from(art_line.clone()));
-                    source_offsets.push(chapter_offset);
-                    chapter_offset += line_chars;
+                    source_offsets.push(image_offset);
                 }
                 // Trailing blank for visual breathing room.
                 lines.push(Line::default());
-                source_offsets.push(chapter_offset);
+                source_offsets.push(image_offset);
+                // chapter_offset deliberately not incremented.
             }
         }
     }
@@ -831,6 +840,44 @@ mod tests {
         assert_eq!(line_text(&wrapped.lines[0]), "  .:-=  ");
         assert_eq!(line_text(&wrapped.lines[1]), "  =+*#  ");
         assert_eq!(line_text(&wrapped.lines[2]), "  *#%@  ");
+    }
+
+    #[test]
+    fn wrap_chapter_image_does_not_advance_source_offset() {
+        // Paragraph + Image + Paragraph. The Image should not advance
+        // chapter_offset, so the second paragraph starts at the same
+        // offset it would have without the image (just the first
+        // paragraph's char count).
+        let p1 = Block::Paragraph {
+            spans: vec![Span::plain("alpha bravo")],
+        };
+        let img = Block::Image(vec!["####".into(), "####".into()]);
+        let p2 = Block::Paragraph {
+            spans: vec![Span::plain("charlie")],
+        };
+        let wrapped = wrap_chapter(&[p1, img, p2], 80);
+
+        // After p1 there are 11 source chars ("alpha bravo"). The image
+        // should NOT add to that, so p2's first line offset is 11.
+        // (The pre-image trailing-blank line is at 11; the image lines
+        // are all at 11; the post-image trailing-blank is at 11; p2's
+        // first line is at 11 too — same source position because the
+        // image contributed nothing.)
+        let p2_first = wrapped
+            .lines
+            .iter()
+            .enumerate()
+            .find(|(_, l)| {
+                let txt: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                txt == "charlie"
+            })
+            .map(|(i, _)| i)
+            .expect("p2 should appear in wrapped");
+        let p2_offset = wrapped.source_offsets[p2_first];
+        assert_eq!(
+            p2_offset, 11,
+            "paragraph after image should start at the same offset the image started at"
+        );
     }
 
     #[test]
