@@ -106,9 +106,19 @@ pub fn wrap_chapter(blocks: &[Block], width: u16) -> WrappedChapter {
                 // so subsequent paragraphs' source offsets stay correct
                 // for smart-resize position tracking. All emitted lines
                 // (including the trailing blank) share the same
-                // source_offset, so smart-resize lands the user at the
-                // image's start (the middle of an image isn't a
-                // meaningful resume point).
+                // source_offset.
+                //
+                // Mid-image resize landing: because the image lines and the
+                // first line of the next paragraph all share the same
+                // source_offset, `partition_point` lands the user on the
+                // last line at that offset — which is the next paragraph's
+                // first line, not the image. The user effectively "skips
+                // past" the image on resize. Acceptable: the middle of an
+                // image isn't a meaningful resume point, and landing on the
+                // following prose is more useful than the image's first
+                // row.
+                //
+                // Postcondition: chapter_offset is the same value as on entry.
                 let image_offset = chapter_offset;
                 for art_line in ascii_lines {
                     lines.push(Line::from(art_line.clone()));
@@ -117,7 +127,6 @@ pub fn wrap_chapter(blocks: &[Block], width: u16) -> WrappedChapter {
                 // Trailing blank for visual breathing room.
                 lines.push(Line::default());
                 source_offsets.push(image_offset);
-                // chapter_offset deliberately not incremented.
             }
         }
     }
