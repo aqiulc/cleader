@@ -556,7 +556,7 @@ fn render_toc_overlay(frame: &mut Frame, area: Rect, toc: &TocOverlay) {
     };
 
     // Compute scroll: keep selection in view.
-    let scroll = compute_toc_scroll(toc.selection, toc.entries.len(), visible_entries);
+    let scroll = center_scroll(toc.selection, toc.entries.len(), visible_entries);
 
     let end = (scroll + visible_entries).min(toc.entries.len());
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible_entries + 2);
@@ -613,7 +613,9 @@ fn render_toc_overlay(frame: &mut Frame, area: Rect, toc: &TocOverlay) {
 
 /// Adjust scroll so `selection` is within the visible window. Centers
 /// the selection when possible, clamps to start/end at the boundaries.
-fn compute_toc_scroll(selection: usize, total: usize, visible: usize) -> usize {
+/// Shared by the TOC overlay and the Library list view — same math,
+/// same semantics.
+fn center_scroll(selection: usize, total: usize, visible: usize) -> usize {
     if total <= visible {
         return 0;
     }
@@ -663,9 +665,9 @@ pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'
 
     // List body: render entries with selection highlight + scroll.
     let visible_rows = chunks[1].height as usize;
-    let scroll = library_scroll_for(input.selection, input.entries.len(), visible_rows);
+    let scroll = center_scroll(input.selection, input.entries.len(), visible_rows);
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible_rows);
-    for (rel, abs) in (scroll..(scroll + visible_rows).min(input.entries.len())).enumerate() {
+    for abs in scroll..(scroll + visible_rows).min(input.entries.len()) {
         let entry = &input.entries[abs];
         let is_selected = abs == input.selection;
         let style = if is_selected {
@@ -680,7 +682,6 @@ pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'
             entry.author
         );
         lines.push(Line::from(TuiSpan::styled(label, style)));
-        let _ = rel;
     }
     frame.render_widget(
         Paragraph::new(lines).block(TuiBlock::default().borders(Borders::NONE)),
@@ -695,19 +696,6 @@ pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'
     frame.render_widget(Paragraph::new(Line::from(footer)), chunks[2]);
 }
 
-/// Scroll so `selection` stays visible. Reuse-friendly with the TOC
-/// overlay's compute_toc_scroll logic, but the library list is full-
-/// screen so the visible window can be much larger.
-fn library_scroll_for(selection: usize, total: usize, visible: usize) -> usize {
-    if total <= visible {
-        return 0;
-    }
-    if selection < visible / 2 {
-        return 0;
-    }
-    let max_scroll = total.saturating_sub(visible);
-    selection.saturating_sub(visible / 2).min(max_scroll)
-}
 
 #[cfg(test)]
 mod tests {
@@ -1371,18 +1359,18 @@ mod tests {
     }
 
     #[test]
-    fn compute_toc_scroll_keeps_selection_in_view() {
+    fn center_scroll_keeps_selection_in_view() {
         // Total 100 entries, window of 10.
         // Selection at start: scroll 0.
-        assert_eq!(compute_toc_scroll(0, 100, 10), 0);
-        assert_eq!(compute_toc_scroll(4, 100, 10), 0);
+        assert_eq!(center_scroll(0, 100, 10), 0);
+        assert_eq!(center_scroll(4, 100, 10), 0);
         // Selection in middle: centered (selection - visible/2).
-        assert_eq!(compute_toc_scroll(50, 100, 10), 45);
+        assert_eq!(center_scroll(50, 100, 10), 45);
         // Selection near end: clamps to max_scroll.
-        assert_eq!(compute_toc_scroll(95, 100, 10), 90);
-        assert_eq!(compute_toc_scroll(99, 100, 10), 90);
+        assert_eq!(center_scroll(95, 100, 10), 90);
+        assert_eq!(center_scroll(99, 100, 10), 90);
         // Total fits in window: no scroll.
-        assert_eq!(compute_toc_scroll(5, 8, 10), 0);
+        assert_eq!(center_scroll(5, 8, 10), 0);
     }
 
     #[test]
@@ -1405,13 +1393,5 @@ mod tests {
                 selection: 0,
             });
         }).unwrap();
-    }
-
-    #[test]
-    fn library_scroll_for_keeps_selection_in_view() {
-        assert_eq!(library_scroll_for(0, 100, 10), 0);
-        assert_eq!(library_scroll_for(50, 100, 10), 45);
-        assert_eq!(library_scroll_for(99, 100, 10), 90);
-        assert_eq!(library_scroll_for(5, 8, 10), 0);
     }
 }

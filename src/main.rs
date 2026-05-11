@@ -85,7 +85,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 fn run_library(dir: &std::path::Path) -> anyhow::Result<Option<PathBuf>> {
     let entries = cleader::library::scan_directory(dir)?;
     if entries.is_empty() {
-        return Err(anyhow::anyhow!("no EPUBs found in {}", dir.display()));
+        return Err(anyhow::anyhow!(
+            "no EPUBs found in {} (scan does not recurse into subdirectories)",
+            dir.display()
+        ));
     }
 
     let mut terminal = setup_terminal()?;
