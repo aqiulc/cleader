@@ -101,12 +101,15 @@ impl LibraryApp {
             Action::Resize(w, h) => {
                 self.viewport_size = (w, h);
             }
+            Action::ToggleViewMode => {
+                // Temporary no-op; v0.4.4 Task 5 replaces this with the
+                // real handler that toggles between list and grid view.
+            }
             // Reader-only actions are no-ops in library mode.
             Action::ChapterNext
             | Action::ChapterPrev
             | Action::ToggleHelp
-            | Action::ToggleToc
-            | Action::ToggleViewMode => {}
+            | Action::ToggleToc => {}
         }
     }
 

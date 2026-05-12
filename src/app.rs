@@ -273,6 +273,7 @@ impl App {
                 Action::ChapterNext | Action::ChapterPrev | Action::ToggleViewMode => {
                     // Chapter nav while TOC is up is ambiguous — the user
                     // probably wanted TOC selection nav. Treat as no-op.
+                    // ToggleViewMode is always a no-op in reader mode (library-only action).
                 }
             }
             return;
