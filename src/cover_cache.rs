@@ -6,11 +6,13 @@
 //! best-effort: a failure leaves the memory cache authoritative for
 //! the current session and silently retries next launch.
 //!
-//! Public API:
-//! - `new()` spawns the worker
-//! - `enqueue(book_id, epub_path)` requests a cover (idempotent)
-//! - `drain_finished()` pulls finished covers off the channel each frame
-//! - `get(book_id)` returns Some(&[String]) only when Ready
+//! This commit (Task 3) provides only the pure I/O surface:
+//! - `default_cache_dir()` / `cache_path()` for resolving paths
+//! - `read_cached()` / `write_cached()` for the disk layer
+//! - `PLACEHOLDER` constant for unrendered cells
+//!
+//! Task 4 adds the `CoverCache` struct with `enqueue` / `drain_finished`
+//! / `get` plus the background worker thread.
 //!
 //! Placeholder lines are 22 cols × 12 rows so cell layout never shifts
 //! when a real cover arrives. Same dimensions as a fully generated
@@ -57,22 +59,27 @@ pub fn cache_path(cache_dir: &Path, book_id: &BookId) -> PathBuf {
     cache_dir.join(format!("{}.txt", book_id.as_str()))
 }
 
-/// Read a cached cover from disk. `Ok(None)` when the file doesn't
-/// exist (a normal cache miss). `Ok(Some(lines))` when present. `Err`
-/// only on disk I/O errors that aren't NotFound (e.g. permission
-/// denied) — caller treats those as misses too.
-pub fn read_cached(cache_dir: &Path, book_id: &BookId) -> std::io::Result<Option<Vec<String>>> {
+/// Read a cached cover from disk. Returns `None` for any failure
+/// (file missing, permission denied, I/O error) — the cache is
+/// best-effort and all read failures are treated as misses. A
+/// successful read of a zero-byte file returns `Some(vec![])`,
+/// which callers should treat as a malformed cache and either
+/// regenerate or ignore.
+pub fn read_cached(cache_dir: &Path, book_id: &BookId) -> Option<Vec<String>> {
     let path = cache_path(cache_dir, book_id);
-    match std::fs::read_to_string(&path) {
-        Ok(content) => Ok(Some(content.lines().map(|l| l.to_string()).collect())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
+    let content = std::fs::read_to_string(&path).ok()?;
+    Some(content.lines().map(|l| l.to_string()).collect())
 }
 
 /// Write a generated cover to disk. Failure is non-fatal; caller logs
 /// or ignores. Atomic write via tempfile + rename (same pattern as
 /// `persistence::save_to`).
+///
+/// Callers should pass a non-empty `lines` slice. An empty slice writes
+/// a zero-byte file that `read_cached` would return as `Some(vec![])`
+/// — a degenerate cache hit. The cover generator always produces
+/// `COVER_THUMBNAIL_HEIGHT` rows, so this is a constraint at the
+/// callsite, not a hard precondition.
 pub fn write_cached(
     cache_dir: &Path,
     book_id: &BookId,
@@ -118,7 +125,7 @@ mod tests {
     fn read_cached_returns_none_for_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let id = book_id(b"missing");
-        let result = read_cached(dir.path(), &id).unwrap();
+        let result = read_cached(dir.path(), &id);
         assert!(result.is_none());
     }
 
@@ -130,7 +137,7 @@ mod tests {
             .map(|i| format!("row {i:02} content padding here"))
             .collect();
         write_cached(dir.path(), &id, &lines).unwrap();
-        let loaded = read_cached(dir.path(), &id).unwrap().unwrap();
+        let loaded = read_cached(dir.path(), &id).unwrap();
         assert_eq!(loaded, lines);
     }
 
@@ -141,7 +148,7 @@ mod tests {
         let id = book_id(b"x");
         let lines = vec!["only one line".to_string()];
         write_cached(&nested, &id, &lines).unwrap();
-        assert!(read_cached(&nested, &id).unwrap().is_some());
+        assert!(read_cached(&nested, &id).is_some());
     }
 
     #[test]
