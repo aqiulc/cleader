@@ -63,12 +63,15 @@ pub struct PrefsStore {
 }
 
 impl PrefsStore {
+    /// Resolve the platform-correct prefs path and load existing state.
     pub fn open() -> Result<Self, PersistenceError> {
         let path = default_prefs_path()?;
         let prefs = load_from(&path);
         Ok(Self { path, prefs })
     }
 
+    /// Open against an explicit path. Intended for tests and internal tooling
+    /// only — production code should use `open()`.
     #[doc(hidden)]
     pub fn open_at(path: PathBuf) -> Self {
         let prefs = load_from(&path);
@@ -98,6 +101,14 @@ mod tests {
     #[test]
     fn default_view_mode_is_grid() {
         assert_eq!(Prefs::default().view_mode, ViewMode::Grid);
+    }
+
+    #[test]
+    fn view_mode_serializes_as_lowercase_string() {
+        // Wire format must stay "grid"/"list" — variant rename or
+        // serde attribute change would break existing prefs files.
+        assert_eq!(serde_json::to_string(&ViewMode::Grid).unwrap(), "\"grid\"");
+        assert_eq!(serde_json::to_string(&ViewMode::List).unwrap(), "\"list\"");
     }
 
     #[test]
@@ -139,5 +150,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = PrefsStore::open_at(dir.path().join("nope.json"));
         assert_eq!(store.view_mode(), ViewMode::Grid);
+    }
+
+    #[test]
+    fn save_does_not_leave_tmp_file_on_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        save_to(&path, &Prefs::default()).unwrap();
+        assert!(!path.with_extension("json.tmp").exists());
     }
 }
