@@ -6,4 +6,5 @@ pub mod input;
 pub mod library;
 pub mod library_app;
 pub mod persistence;
+pub mod prefs;
 pub mod reader;
