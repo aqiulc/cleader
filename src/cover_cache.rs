@@ -2,17 +2,18 @@
 //!
 //! Holds an in-memory map of `BookId -> CoverState` plus a disk cache
 //! at `<data_dir>/covers/<book_id>.txt`. ASCII generation runs on a
-//! background worker thread (wired in Task 4). Disk reads/writes are
-//! best-effort: a failure leaves the memory cache authoritative for
-//! the current session and silently retries next launch.
+//! background worker thread spawned by `CoverCache::open`. Disk
+//! reads/writes are best-effort: a failure leaves the memory cache
+//! authoritative for the current session and silently retries next
+//! launch.
 //!
-//! This commit (Task 3) provides only the pure I/O surface:
-//! - `default_cache_dir()` / `cache_path()` for resolving paths
-//! - `read_cached()` / `write_cached()` for the disk layer
-//! - `PLACEHOLDER` constant for unrendered cells
-//!
-//! Task 4 adds the `CoverCache` struct with `enqueue` / `drain_finished`
-//! / `get` plus the background worker thread.
+//! Public API:
+//! - `CoverCache::open()` (or `open_at()` for tests) spawns the worker
+//! - `enqueue(book_id, epub_path)` requests a cover (idempotent — disk
+//!   hit short-circuits; otherwise queues the worker)
+//! - `drain_finished()` pulls finished covers off the channel each frame
+//! - `get(book_id)` returns `Some(&[String])` only when Ready
+//! - Drop joins the worker cleanly
 //!
 //! Placeholder lines are 22 cols × 12 rows so cell layout never shifts
 //! when a real cover arrives. Same dimensions as a fully generated
@@ -174,10 +175,14 @@ impl CoverCache {
         if self.memory.contains_key(&book_id) {
             return;
         }
-        // Try disk first.
+        // Try disk first. Reject malformed cache (wrong line count)
+        // and fall through to regenerate — `write_cached`'s doc comment
+        // flagged this degenerate case.
         if let Some(lines) = read_cached(&self.cache_dir, &book_id) {
-            self.memory.insert(book_id, CoverState::Ready(lines));
-            return;
+            if lines.len() == COVER_THUMBNAIL_HEIGHT as usize {
+                self.memory.insert(book_id, CoverState::Ready(lines));
+                return;
+            }
         }
         // Disk miss — queue the worker.
         self.memory.insert(book_id.clone(), CoverState::Pending);
@@ -217,10 +222,10 @@ fn worker_loop(
         let lines = generate_cover(&job.epub_path).unwrap_or_else(|| {
             PLACEHOLDER.iter().map(|s| s.to_string()).collect()
         });
-        // Best-effort disk write — failure is non-fatal.
-        if !lines.is_empty() {
-            let _ = write_cached(&cache_dir, &job.book_id, &lines);
-        }
+        // Best-effort disk write — failure is non-fatal. `lines` is
+        // always COVER_THUMBNAIL_HEIGHT entries by construction
+        // (placeholder fallback + generate_cover's pad-to-height).
+        let _ = write_cached(&cache_dir, &job.book_id, &lines);
         if result_tx
             .send(CoverResult { book_id: job.book_id, lines })
             .is_err()
