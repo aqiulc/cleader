@@ -15,7 +15,7 @@
 //! - `get(book_id)` returns `Some(&[String])` only when Ready
 //! - Drop joins the worker cleanly
 //!
-//! Placeholder lines are 22 cols × 12 rows so cell layout never shifts
+//! Placeholder lines are 22 cols × 17 rows so cell layout never shifts
 //! when a real cover arrives. Same dimensions as a fully generated
 //! cover (matches COVER_THUMBNAIL_WIDTH / COVER_THUMBNAIL_HEIGHT).
 
@@ -28,18 +28,23 @@ pub const COVER_THUMBNAIL_WIDTH: u16 = 22;
 
 /// Rows of ASCII art per thumbnail. Pad with blanks if a generated cover
 /// is shorter, truncate if longer.
-pub const COVER_THUMBNAIL_HEIGHT: u16 = 12;
+pub const COVER_THUMBNAIL_HEIGHT: u16 = 17;
 
 /// Static placeholder shown while a cover is Pending or unavailable.
-/// 22 cols × 12 rows. Replace this constant with a real logo when
+/// 22 cols × 17 rows. Replace this constant with a real logo when
 /// designed; cell layout is unaffected.
-pub const PLACEHOLDER: [&str; 12] = [
+pub const PLACEHOLDER: [&str; 17] = [
     "+--------------------+",
     "|                    |",
     "|                    |",
     "|                    |",
     "|                    |",
+    "|                    |",
+    "|                    |",
+    "|                    |",
     "|      cleader       |",
+    "|                    |",
+    "|                    |",
     "|                    |",
     "|                    |",
     "|                    |",
@@ -54,7 +59,9 @@ pub const PLACEHOLDER: [&str; 12] = [
 /// letterbox fix + placeholder-not-cached fix in the v0.4.4 patch
 /// cycle (covers generated before that were clipped, and any book
 /// that ever failed to decode had the placeholder pinned to disk).
-const COVER_CACHE_VERSION: &str = "v3";
+/// v4: COVER_THUMBNAIL_HEIGHT 12 → 17 (natural-aspect 2:3 cover at
+/// width 22) and CELL_HEIGHT 16 → 21; output dimensions changed.
+const COVER_CACHE_VERSION: &str = "v4";
 
 /// Resolve `<data_dir>/covers/<version>/`. Returns `None` if the OS can't
 /// tell us where the data dir is (rare; e.g. unset $HOME on a fresh CI
@@ -252,20 +259,34 @@ fn worker_loop(
     }
 }
 
-/// Open the EPUB, extract cover bytes (via OPF metadata if available,
-/// else by finding the first `<img>` in the first spine item), then
-/// ASCII-render at exactly `COVER_THUMBNAIL_WIDTH × COVER_THUMBNAIL_HEIGHT`.
+/// Open the EPUB, find a cover (via OPF metadata or the first inline
+/// `<img>` in the first chapter), then ASCII-render it at natural
+/// aspect within `COVER_THUMBNAIL_WIDTH` columns. Pads or truncates the
+/// height to `COVER_THUMBNAIL_HEIGHT` so the grid cell shape stays
+/// uniform across books with slightly different aspect ratios.
+///
 /// Returns `None` if the EPUB can't be opened, has no cover by either
 /// path, or the cover can't be decoded.
 fn generate_cover(epub_path: &Path) -> Option<Vec<String>> {
     let mut doc = epub::doc::EpubDoc::new(epub_path).ok()?;
     let bytes = find_cover_bytes(&mut doc)?;
-    let lines = crate::ascii_art::image_to_ascii_sized(
-        &bytes,
-        COVER_THUMBNAIL_WIDTH,
-        COVER_THUMBNAIL_HEIGHT,
-    )
-    .ok()?;
+    let mut lines = crate::ascii_art::image_to_ascii(&bytes, COVER_THUMBNAIL_WIDTH).ok()?;
+    // Trim if natural rendering produced more rows than the cell allows.
+    lines.truncate(COVER_THUMBNAIL_HEIGHT as usize);
+    // Pad with blank rows if natural rendering produced fewer rows
+    // (squarish or landscape covers). Center-pad so the cover sits
+    // visually centered within the cell.
+    if lines.len() < COVER_THUMBNAIL_HEIGHT as usize {
+        let blank = " ".repeat(COVER_THUMBNAIL_WIDTH as usize);
+        let missing = COVER_THUMBNAIL_HEIGHT as usize - lines.len();
+        let top_pad = missing / 2;
+        let bot_pad = missing - top_pad;
+        let mut padded = Vec::with_capacity(COVER_THUMBNAIL_HEIGHT as usize);
+        for _ in 0..top_pad { padded.push(blank.clone()); }
+        padded.extend(lines);
+        for _ in 0..bot_pad { padded.push(blank.clone()); }
+        lines = padded;
+    }
     Some(lines)
 }
 
@@ -302,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_dimensions_are_22x12() {
+    fn placeholder_dimensions_are_22x17() {
         assert_eq!(PLACEHOLDER.len(), COVER_THUMBNAIL_HEIGHT as usize);
         for (i, row) in PLACEHOLDER.iter().enumerate() {
             assert_eq!(
@@ -367,14 +388,14 @@ mod tests {
     fn enqueue_with_disk_cache_hit_populates_memory_synchronously() {
         let dir = tempfile::tempdir().unwrap();
         let id = book_id(b"disk-hit");
-        let lines: Vec<String> = (0..12).map(|i| format!("L{i:02}{}", " ".repeat(20))).collect();
+        let lines: Vec<String> = (0..17).map(|i| format!("L{i:02}{}", " ".repeat(20))).collect();
         write_cached(dir.path(), &id, &lines).unwrap();
 
         let mut cache = CoverCache::open_at(dir.path().to_path_buf());
         // Path doesn't have to exist on disk — the disk-cache hit shortcircuits.
         cache.enqueue(id.clone(), PathBuf::from("/does/not/matter.epub"));
         let got = cache.get(&id).expect("disk hit should populate memory");
-        assert_eq!(got.len(), 12);
+        assert_eq!(got.len(), 17);
         assert!(got[0].starts_with("L00"));
     }
 
@@ -417,7 +438,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let got = got.expect("worker should deliver placeholder within 500ms");
-        assert_eq!(got.len(), 12);
+        assert_eq!(got.len(), 17);
         assert_eq!(got[0], PLACEHOLDER[0]);
     }
 
@@ -493,8 +514,8 @@ mod tests {
         if let Some(path) = default_cache_dir() {
             let s = path.to_string_lossy();
             assert!(
-                s.contains("covers") && s.ends_with("v3"),
-                "default_cache_dir should be .../covers/v3, got {s}"
+                s.contains("covers") && s.ends_with("v4"),
+                "default_cache_dir should be .../covers/v4, got {s}"
             );
         }
     }

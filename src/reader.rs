@@ -652,7 +652,7 @@ pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'
 /// Cell width and height for the grid view. 24x16 = 22x14 inside the
 /// 1-col border, split into a 22x12 cover region and a 22x2 title region.
 pub const CELL_WIDTH: u16 = 24;
-pub const CELL_HEIGHT: u16 = 16;
+pub const CELL_HEIGHT: u16 = 21;
 
 /// Compute the visible-cell index range for the library grid view.
 ///
@@ -1660,8 +1660,8 @@ mod tests {
     }
 
     #[test]
-    fn render_library_grid_renders_on_80x24_without_panic() {
-        let backend = TestBackend::new(80, 24);
+    fn render_library_grid_renders_on_80x40_without_panic() {
+        let backend = TestBackend::new(80, 40);
         let mut term = Terminal::new(backend).unwrap();
         let entries: Vec<_> = (0..6).map(|i| lib_entry(&format!("Book{i}"))).collect();
         let book_ids: Vec<Option<BookId>> = (0..entries.len()).map(|_| None).collect();
@@ -1692,7 +1692,7 @@ mod tests {
         let id = BookId::from_bytes(b"book-a");
         // Write a deliberately-recognizable cover row to disk so the
         // cache picks it up via enqueue (synchronous disk-hit path).
-        let lines: Vec<String> = (0..12)
+        let lines: Vec<String> = (0..17)
             .map(|i| format!("ROW{i:02}{}", " ".repeat(17)))
             .collect();
         crate::cover_cache::write_cached(dir.path(), &id, &lines).unwrap();
@@ -1700,7 +1700,7 @@ mod tests {
 
         let entries = vec![lib_entry("Book A")];
         let book_ids = vec![Some(id.clone())];
-        let backend = TestBackend::new(80, 24);
+        let backend = TestBackend::new(80, 40);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|frame| {
             let area = frame.area();
@@ -1745,7 +1745,7 @@ mod tests {
         let book_ids = vec![None];
 
         for view_mode in [ViewMode::List, ViewMode::Grid] {
-            let backend = TestBackend::new(80, 24);
+            let backend = TestBackend::new(80, 40);
             let mut term = Terminal::new(backend).unwrap();
             term.draw(|frame| {
                 let area = frame.area();
@@ -1782,18 +1782,18 @@ mod tests {
 
     #[test]
     fn visible_grid_range_page_snaps_selection() {
-        // 80x32 grid area: cols=3, rows=2 → 6 cells/page
+        // 80x42 grid area: cols=3, rows=2 → 6 cells/page
         // selection=0 → page 0 → 0..6
-        let r = visible_grid_range(80, 32, 100, 0).unwrap();
+        let r = visible_grid_range(80, 42, 100, 0).unwrap();
         assert_eq!(r, 0..6);
         // selection=5 → still page 0 → 0..6
-        let r = visible_grid_range(80, 32, 100, 5).unwrap();
+        let r = visible_grid_range(80, 42, 100, 5).unwrap();
         assert_eq!(r, 0..6);
         // selection=6 → page 1 → 6..12
-        let r = visible_grid_range(80, 32, 100, 6).unwrap();
+        let r = visible_grid_range(80, 42, 100, 6).unwrap();
         assert_eq!(r, 6..12);
         // selection=99 → page 16 → 96..100 (clamped to total)
-        let r = visible_grid_range(80, 32, 100, 99).unwrap();
+        let r = visible_grid_range(80, 42, 100, 99).unwrap();
         assert_eq!(r, 96..100);
     }
 }

@@ -261,7 +261,7 @@ fn library_grid_renders_without_panic_when_directory_has_epubs() {
     let cache_dir = tempfile::tempdir().unwrap();
     let cover_cache = CoverCache::open_at(cache_dir.path().to_path_buf());
 
-    let mut app = LibraryApp::new_with(entries, (80, 24), Some(prefs), Some(cover_cache));
+    let mut app = LibraryApp::new_with(entries, (80, 40), Some(prefs), Some(cover_cache));
     app.request_visible_covers(0..1);
     // Give the worker a moment so the cover may land in the cache.
     for _ in 0..30 {
@@ -273,7 +273,7 @@ fn library_grid_renders_without_panic_when_directory_has_epubs() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
-    let backend = TestBackend::new(80, 24);
+    let backend = TestBackend::new(80, 40);
     let mut term = Terminal::new(backend).unwrap();
     let entries_snapshot: Vec<_> = app.entries().to_vec();
     let book_ids_snapshot: Vec<Option<cleader::epub::BookId>> = (0..app.entries().len())
