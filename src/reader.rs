@@ -654,6 +654,37 @@ pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'
 pub const CELL_WIDTH: u16 = 24;
 pub const CELL_HEIGHT: u16 = 16;
 
+/// Compute the visible-cell index range for the library grid view.
+///
+/// `grid_w` / `grid_h` are the dimensions of the grid area (already
+/// post-reservation — the renderer's outer layout strips 1 row for
+/// title and 1 row for footer before calling this). Returns `None`
+/// when the grid area is too small for even one cell.
+///
+/// Selection is page-snapped (top-of-screen is the start of the page
+/// containing the selection).
+///
+/// Used by both `render_library_grid` (to know which cells to draw)
+/// and `library_event_loop` (to know which covers to request). Keeping
+/// the math in one place prevents drift between the two callsites.
+pub fn visible_grid_range(
+    grid_w: u16,
+    grid_h: u16,
+    total: usize,
+    selection: usize,
+) -> Option<std::ops::Range<usize>> {
+    if grid_w < CELL_WIDTH || grid_h < CELL_HEIGHT {
+        return None;
+    }
+    let cols = (grid_w / CELL_WIDTH).max(1) as usize;
+    let rows = (grid_h / CELL_HEIGHT).max(1) as usize;
+    let selection_row = selection / cols;
+    let top_row = (selection_row / rows) * rows;
+    let first = top_row * cols;
+    let last = (first + cols * rows).min(total);
+    Some(first..last)
+}
+
 fn render_library_list(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'_>) {
     // Layout: title bar (1 row), list (rest), footer (1 row).
     let chunks = Layout::default()
@@ -737,19 +768,17 @@ fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
     let grid_area = outer[1];
     let cols = (grid_area.width / CELL_WIDTH).max(1) as usize;
     let rows = (grid_area.height / CELL_HEIGHT).max(1) as usize;
-    let cells_per_screen = cols * rows;
     let total = input.entries.len();
 
-    // Page-snapping scroll: top-of-screen index is the start of the row
-    // containing the current selection, rounded down to the nearest
-    // full page boundary.
-    let selection_row = input.selection / cols;
-    let top_row = (selection_row / rows) * rows;
-    let first_idx = top_row * cols;
-    let last_idx = (first_idx + cells_per_screen).min(total);
+    // Get the visible index range from the shared helper. Since we're
+    // already past the force_list guard, the helper returns Some.
+    let visible = visible_grid_range(grid_area.width, grid_area.height, total, input.selection)
+        .unwrap_or(0..0);
+    let first_idx = visible.start;
+    let last_idx = visible.end;
 
     // Build a vertical stack of horizontal cell rows.
-    let mut cell_rects: Vec<Rect> = Vec::with_capacity(cells_per_screen);
+    let mut cell_rects: Vec<Rect> = Vec::with_capacity(cols * rows);
     let row_constraints: Vec<Constraint> = (0..rows)
         .map(|_| Constraint::Length(CELL_HEIGHT))
         .collect();
@@ -1743,5 +1772,28 @@ mod tests {
                 "{view_mode:?} footer should contain warning, got:\n{buffer_text}"
             );
         }
+    }
+
+    #[test]
+    fn visible_grid_range_returns_none_when_too_small() {
+        assert!(visible_grid_range(10, 10, 100, 0).is_none()); // width too small
+        assert!(visible_grid_range(80, 10, 100, 0).is_none()); // height too small
+    }
+
+    #[test]
+    fn visible_grid_range_page_snaps_selection() {
+        // 80x32 grid area: cols=3, rows=2 → 6 cells/page
+        // selection=0 → page 0 → 0..6
+        let r = visible_grid_range(80, 32, 100, 0).unwrap();
+        assert_eq!(r, 0..6);
+        // selection=5 → still page 0 → 0..6
+        let r = visible_grid_range(80, 32, 100, 5).unwrap();
+        assert_eq!(r, 0..6);
+        // selection=6 → page 1 → 6..12
+        let r = visible_grid_range(80, 32, 100, 6).unwrap();
+        assert_eq!(r, 6..12);
+        // selection=99 → page 16 → 96..100 (clamped to total)
+        let r = visible_grid_range(80, 32, 100, 99).unwrap();
+        assert_eq!(r, 96..100);
     }
 }
