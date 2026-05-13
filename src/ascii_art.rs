@@ -74,6 +74,46 @@ pub fn image_to_ascii(
     Ok(lines)
 }
 
+/// Convert raw image bytes to a Vec of ASCII rows, sized exactly to
+/// `target_width × target_height` cells. Unlike `image_to_ascii`, this
+/// does NOT preserve source aspect — the image is resampled to fit
+/// the requested rectangle. Use this for fixed-cell rendering where a
+/// uniform cell shape matters more than aspect fidelity (e.g., the
+/// grid library view's cover thumbnails).
+///
+/// For typical 2:3 book covers rendered at 22×12 cells (effective
+/// 22×24 visual pixels), the resulting image will look ~37% wider
+/// than reality. The tradeoff: covers fill the cell, every glyph
+/// carries information, and the cell shape stays uniform across
+/// books with different aspect ratios.
+pub fn image_to_ascii_sized(
+    bytes: &[u8],
+    target_width: u16,
+    target_height: u16,
+) -> Result<Vec<String>, image::ImageError> {
+    let img = image::load_from_memory(bytes)?.to_luma8();
+    let target_width = target_width.max(1);
+    let target_height = target_height.max(1);
+    let resized = image::imageops::resize(
+        &img,
+        target_width as u32,
+        target_height as u32,
+        FilterType::Lanczos3,
+    );
+    let mut lines = Vec::with_capacity(target_height as usize);
+    for y in 0..target_height as u32 {
+        let mut line = String::with_capacity(target_width as usize);
+        for x in 0..target_width as u32 {
+            let pixel = resized.get_pixel(x, y);
+            let brightness = pixel[0] as usize;
+            let idx = (brightness * (ASCII_GRADIENT.len() - 1)) / 255;
+            line.push(ASCII_GRADIENT[idx]);
+        }
+        lines.push(line);
+    }
+    Ok(lines)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +204,16 @@ mod tests {
         let bytes = solid_png(1, 10000, 128);
         let lines = image_to_ascii(&bytes, 10).unwrap();
         assert!(lines.len() <= MAX_TARGET_HEIGHT as usize);
+    }
+
+    #[test]
+    fn image_to_ascii_sized_produces_exact_dimensions() {
+        let bytes = solid_png(100, 50, 128);
+        let lines = image_to_ascii_sized(&bytes, 22, 12).unwrap();
+        assert_eq!(lines.len(), 12);
+        for line in &lines {
+            assert_eq!(line.chars().count(), 22);
+        }
     }
 
     #[test]

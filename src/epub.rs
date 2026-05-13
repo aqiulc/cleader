@@ -224,7 +224,7 @@ fn walk_block_level_with_resolver(
 /// Used by `Book::open`'s first pass to know which image resources to
 /// fetch and ASCII-render before walking the chapter into blocks.
 /// Empty/whitespace-only `src` values are skipped.
-fn collect_img_srcs(xhtml: &str) -> Vec<String> {
+pub(crate) fn collect_img_srcs(xhtml: &str) -> Vec<String> {
     let doc = Html::parse_document(xhtml);
     let selector = scraper::Selector::parse("img").expect("static selector parses");
     doc.select(&selector)
@@ -240,7 +240,7 @@ fn collect_img_srcs(xhtml: &str) -> Vec<String> {
 /// a chapter at `OEBPS/text/chapter1.xhtml` with `src="../images/fig.png"`
 /// resolves to `OEBPS/images/fig.png`. When the chapter path is `None`
 /// (rare — broken EPUB), we fall back to the raw src.
-fn resolve_image_path(chapter_path: Option<&Path>, src: &str) -> PathBuf {
+pub(crate) fn resolve_image_path(chapter_path: Option<&Path>, src: &str) -> PathBuf {
     match chapter_path {
         Some(ch) => {
             let parent = ch.parent().unwrap_or_else(|| Path::new(""));

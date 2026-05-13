@@ -54,7 +54,7 @@ pub const PLACEHOLDER: [&str; 12] = [
 /// letterbox fix + placeholder-not-cached fix in the v0.4.4 patch
 /// cycle (covers generated before that were clipped, and any book
 /// that ever failed to decode had the placeholder pinned to disk).
-const COVER_CACHE_VERSION: &str = "v2";
+const COVER_CACHE_VERSION: &str = "v3";
 
 /// Resolve `<data_dir>/covers/<version>/`. Returns `None` if the OS can't
 /// tell us where the data dir is (rare; e.g. unset $HOME on a fresh CI
@@ -252,47 +252,45 @@ fn worker_loop(
     }
 }
 
-/// Open the EPUB, extract the raw cover bytes, ASCII-render at a width
-/// chosen so the natural-aspect height fits in `COVER_THUMBNAIL_HEIGHT`
-/// rows. Pads each row to `COVER_THUMBNAIL_WIDTH` columns so the cover
-/// always fills the cell region. Returns `None` if the EPUB can't be
-/// opened, has no cover, or the cover can't be decoded by `image`.
+/// Open the EPUB, extract cover bytes (via OPF metadata if available,
+/// else by finding the first `<img>` in the first spine item), then
+/// ASCII-render at exactly `COVER_THUMBNAIL_WIDTH × COVER_THUMBNAIL_HEIGHT`.
+/// Returns `None` if the EPUB can't be opened, has no cover by either
+/// path, or the cover can't be decoded.
 fn generate_cover(epub_path: &Path) -> Option<Vec<String>> {
     let mut doc = epub::doc::EpubDoc::new(epub_path).ok()?;
-    let (bytes, _mime) = doc.get_cover()?;
-
-    // Decode just enough to learn the source aspect so we can pick a
-    // render width that fits in COVER_THUMBNAIL_HEIGHT rows.
-    let img = image::load_from_memory(&bytes).ok()?;
-    let (src_w, src_h) = (img.width().max(1), img.height().max(1));
-    let aspect = src_h as f32 / src_w as f32;
-    // image_to_ascii halves the height for terminal cell aspect, so
-    // produced rows = round(target_w * aspect * 0.5). Solve for the
-    // largest target_w that keeps rows <= COVER_THUMBNAIL_HEIGHT.
-    let max_w_for_height = (COVER_THUMBNAIL_HEIGHT as f32 * 2.0 / aspect).floor() as u16;
-    let target_w = max_w_for_height.clamp(1, COVER_THUMBNAIL_WIDTH);
-
-    let mut lines = crate::ascii_art::image_to_ascii(&bytes, target_w).ok()?;
-
-    // Center-pad each row to COVER_THUMBNAIL_WIDTH (letterbox horizontally).
-    let pad_total = (COVER_THUMBNAIL_WIDTH as usize).saturating_sub(target_w as usize);
-    let pad_left = pad_total / 2;
-    let pad_right = pad_total - pad_left;
-    for line in &mut lines {
-        let mut padded = String::with_capacity(COVER_THUMBNAIL_WIDTH as usize);
-        for _ in 0..pad_left { padded.push(' '); }
-        padded.push_str(line);
-        for _ in 0..pad_right { padded.push(' '); }
-        *line = padded;
-    }
-
-    // Pad height to COVER_THUMBNAIL_HEIGHT (letterbox vertically) so the
-    // grid cell is always a fixed shape. Truncate if somehow over.
-    lines.truncate(COVER_THUMBNAIL_HEIGHT as usize);
-    while lines.len() < COVER_THUMBNAIL_HEIGHT as usize {
-        lines.push(" ".repeat(COVER_THUMBNAIL_WIDTH as usize));
-    }
+    let bytes = find_cover_bytes(&mut doc)?;
+    let lines = crate::ascii_art::image_to_ascii_sized(
+        &bytes,
+        COVER_THUMBNAIL_WIDTH,
+        COVER_THUMBNAIL_HEIGHT,
+    )
+    .ok()?;
     Some(lines)
+}
+
+/// Resolve cover bytes from an opened EpubDoc. Tries:
+/// 1. The OPF-declared cover (`doc.get_cover()`).
+/// 2. The first `<img src>` in the first spine item's XHTML, resolved
+///    against the EPUB's manifest. Many EPUBs (especially older or
+///    hand-rolled ones) don't declare a cover in OPF but include one
+///    inline at the top of the first chapter.
+fn find_cover_bytes(
+    doc: &mut epub::doc::EpubDoc<std::io::BufReader<std::fs::File>>,
+) -> Option<Vec<u8>> {
+    // Path 1: OPF metadata.
+    if let Some((bytes, _mime)) = doc.get_cover() {
+        return Some(bytes);
+    }
+
+    // Path 2: first image in the first spine item.
+    // doc starts positioned at the first spine item after EpubDoc::new.
+    let current_path = doc.get_current_path();
+    let content = doc.get_current_str().map(|(s, _)| s)?;
+    let srcs = crate::epub::collect_img_srcs(&content);
+    let first_src = srcs.into_iter().next()?;
+    let resolved = crate::epub::resolve_image_path(current_path.as_deref(), &first_src);
+    doc.get_resource_by_path(&resolved)
 }
 
 #[cfg(test)]
@@ -466,13 +464,37 @@ mod tests {
     }
 
     #[test]
+    fn generate_cover_returns_uniform_dimensions() {
+        // Smoke test: when a fixture EPUB is available and its cover
+        // is generated, the result is exactly COVER_THUMBNAIL_WIDTH x
+        // COVER_THUMBNAIL_HEIGHT lines. Skip cleanly without a fixture.
+        let path = match std::fs::read_dir("books").ok() {
+            Some(entries) => entries.flatten().find_map(|e| {
+                let p = e.path();
+                (p.extension().and_then(|x| x.to_str()) == Some("epub")).then_some(p)
+            }),
+            None => None,
+        };
+        let Some(epub_path) = path else {
+            eprintln!("cover_cache test: skipping — no .epub fixture in books/");
+            return;
+        };
+        let lines = super::generate_cover(&epub_path);
+        if let Some(lines) = lines {
+            assert_eq!(lines.len(), COVER_THUMBNAIL_HEIGHT as usize);
+            for line in &lines {
+                assert_eq!(line.chars().count(), COVER_THUMBNAIL_WIDTH as usize);
+            }
+        }
+    }
+
+    #[test]
     fn default_cache_dir_uses_versioned_subdir() {
-        // The dir is OS-dependent so we just assert the v2 suffix.
         if let Some(path) = default_cache_dir() {
             let s = path.to_string_lossy();
             assert!(
-                s.contains("covers") && s.ends_with("v2"),
-                "default_cache_dir should be .../covers/v2, got {s}"
+                s.contains("covers") && s.ends_with("v3"),
+                "default_cache_dir should be .../covers/v3, got {s}"
             );
         }
     }
