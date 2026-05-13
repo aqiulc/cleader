@@ -48,11 +48,20 @@ pub const PLACEHOLDER: [&str; 12] = [
     "+--------------------+",
 ];
 
-/// Resolve `<data_dir>/covers/`. Returns `None` if the OS can't tell us
-/// where the data dir is (rare; e.g. unset $HOME on a fresh CI runner).
+/// Bump this when the on-disk cover format or rendering pipeline
+/// changes in a way that should invalidate every previously-cached
+/// cover. v1 was the initial release; v2 was triggered by the
+/// letterbox fix + placeholder-not-cached fix in the v0.4.4 patch
+/// cycle (covers generated before that were clipped, and any book
+/// that ever failed to decode had the placeholder pinned to disk).
+const COVER_CACHE_VERSION: &str = "v2";
+
+/// Resolve `<data_dir>/covers/<version>/`. Returns `None` if the OS can't
+/// tell us where the data dir is (rare; e.g. unset $HOME on a fresh CI
+/// runner).
 pub fn default_cache_dir() -> Option<PathBuf> {
     let dirs = ProjectDirs::from("", "", "cleader")?;
-    Some(dirs.data_dir().join("covers"))
+    Some(dirs.data_dir().join("covers").join(COVER_CACHE_VERSION))
 }
 
 /// Cache file path for a given book id.
@@ -219,13 +228,20 @@ fn worker_loop(
     cache_dir: PathBuf,
 ) {
     while let Ok(job) = job_rx.recv() {
-        let lines = generate_cover(&job.epub_path).unwrap_or_else(|| {
-            PLACEHOLDER.iter().map(|s| s.to_string()).collect()
-        });
-        // Best-effort disk write — failure is non-fatal. `lines` is
-        // always COVER_THUMBNAIL_HEIGHT entries by construction
-        // (placeholder fallback + generate_cover's pad-to-height).
-        let _ = write_cached(&cache_dir, &job.book_id, &lines);
+        let lines = match generate_cover(&job.epub_path) {
+            Some(real_cover) => {
+                // Best-effort disk write — failure is non-fatal.
+                let _ = write_cached(&cache_dir, &job.book_id, &real_cover);
+                real_cover
+            }
+            None => {
+                // Decode failed (no cover, unsupported format, corrupt
+                // EPUB, etc.). Send placeholder to render but DO NOT
+                // write it to disk — a future image-crate update or
+                // EPUB fix should be able to retry.
+                PLACEHOLDER.iter().map(|s| s.to_string()).collect()
+            }
+        };
         if result_tx
             .send(CoverResult { book_id: job.book_id, lines })
             .is_err()
@@ -416,5 +432,48 @@ mod tests {
         let cache = CoverCache::open_at(dir.path().to_path_buf());
         drop(cache);
         // If we got here, the worker exited cleanly.
+    }
+
+    #[test]
+    fn worker_does_not_cache_placeholder_to_disk() {
+        // A book that fails to decode (missing path) should NOT have
+        // its placeholder written to disk — otherwise a one-time
+        // failure becomes a permanent stuck placeholder.
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = CoverCache::open_at(dir.path().to_path_buf());
+        let id = book_id(b"will-fail-to-decode");
+        cache.enqueue(id.clone(), PathBuf::from("/no/such/book.epub"));
+
+        // Wait for the worker to deliver placeholder.
+        for _ in 0..50 {
+            cache.drain_finished();
+            if cache.get(&id).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(cache.get(&id).is_some(), "worker should deliver placeholder");
+
+        // Drop the cache so the worker exits.
+        drop(cache);
+
+        // The disk should NOT have a cached file for this book.
+        let cache_file = cache_path(dir.path(), &id);
+        assert!(
+            !cache_file.exists(),
+            "placeholder must not be written to disk; found {cache_file:?}"
+        );
+    }
+
+    #[test]
+    fn default_cache_dir_uses_versioned_subdir() {
+        // The dir is OS-dependent so we just assert the v2 suffix.
+        if let Some(path) = default_cache_dir() {
+            let s = path.to_string_lossy();
+            assert!(
+                s.contains("covers") && s.ends_with("v2"),
+                "default_cache_dir should be .../covers/v2, got {s}"
+            );
+        }
     }
 }
