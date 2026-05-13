@@ -35,25 +35,7 @@ impl LibraryApp {
     /// list) if the OS data dir is unavailable. Prefs failure falls back
     /// to default (ViewMode::Grid).
     pub fn new(entries: Vec<LibraryEntry>, viewport: (u16, u16)) -> Self {
-        let prefs = PrefsStore::open().ok();
-        let view_mode = prefs
-            .as_ref()
-            .map(|p| p.view_mode())
-            .unwrap_or_default();
-        let cover_cache = CoverCache::open();
-        let book_ids = vec![None; entries.len()];
-        Self {
-            entries,
-            book_ids,
-            selection: 0,
-            viewport_size: viewport,
-            should_quit: false,
-            selected_path: None,
-            view_mode,
-            cover_cache,
-            prefs,
-            save_error: None,
-        }
+        Self::new_with(entries, viewport, PrefsStore::open().ok(), CoverCache::open())
     }
 
     /// Test/internal constructor: caller injects prefs and cache (or
@@ -140,6 +122,12 @@ impl LibraryApp {
     /// to a `BookId` (lazily — computed once and stored in
     /// `self.book_ids[idx]`), then calls `enqueue`. Indices out of range
     /// are silently skipped.
+    ///
+    /// Each uncached index performs a synchronous file read on the
+    /// calling thread (needed because `BookId` is content-hashed from
+    /// the EPUB bytes). Callers must restrict `indices` to the visible
+    /// window — typically the cells currently on screen — to avoid
+    /// perceptible stalls when scrolling through large libraries.
     pub fn request_visible_covers(&mut self, indices: impl IntoIterator<Item = usize>) {
         let Some(cache) = self.cover_cache.as_mut() else {
             return;
@@ -235,6 +223,7 @@ impl LibraryApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn entry(title: &str) -> LibraryEntry {
         LibraryEntry {
@@ -246,9 +235,11 @@ mod tests {
 
     #[test]
     fn line_down_moves_selection() {
-        let mut app = LibraryApp::new(
+        let mut app = LibraryApp::new_with(
             vec![entry("A"), entry("B"), entry("C")],
             (80, 24),
+            None,
+            None,
         );
         assert_eq!(app.selection(), 0);
         app.handle(Action::LineDown);
@@ -257,7 +248,7 @@ mod tests {
 
     #[test]
     fn line_down_clamps_at_end() {
-        let mut app = LibraryApp::new(vec![entry("A"), entry("B")], (80, 24));
+        let mut app = LibraryApp::new_with(vec![entry("A"), entry("B")], (80, 24), None, None);
         app.handle(Action::LineDown);
         app.handle(Action::LineDown);
         app.handle(Action::LineDown);
@@ -266,16 +257,18 @@ mod tests {
 
     #[test]
     fn line_up_at_top_is_noop() {
-        let mut app = LibraryApp::new(vec![entry("A"), entry("B")], (80, 24));
+        let mut app = LibraryApp::new_with(vec![entry("A"), entry("B")], (80, 24), None, None);
         app.handle(Action::LineUp);
         assert_eq!(app.selection(), 0);
     }
 
     #[test]
     fn confirm_sets_selected_path_and_should_quit() {
-        let mut app = LibraryApp::new(
+        let mut app = LibraryApp::new_with(
             vec![entry("A"), entry("B"), entry("C")],
             (80, 24),
+            None,
+            None,
         );
         app.handle(Action::LineDown);
         app.handle(Action::Confirm);
@@ -285,7 +278,7 @@ mod tests {
 
     #[test]
     fn quit_sets_should_quit_without_selection() {
-        let mut app = LibraryApp::new(vec![entry("A")], (80, 24));
+        let mut app = LibraryApp::new_with(vec![entry("A")], (80, 24), None, None);
         app.handle(Action::Quit);
         assert!(app.should_quit());
         assert!(app.selected_path().is_none());
@@ -295,7 +288,7 @@ mod tests {
     fn confirm_on_empty_library_is_noop() {
         // Edge case: an empty library shouldn't be reachable (main.rs
         // exits with a clean error before launching), but be defensive.
-        let mut app = LibraryApp::new(vec![], (80, 24));
+        let mut app = LibraryApp::new_with(vec![], (80, 24), None, None);
         app.handle(Action::Confirm);
         assert!(!app.should_quit());
         assert!(app.selected_path().is_none());
@@ -304,16 +297,18 @@ mod tests {
     #[test]
     fn page_next_advances_by_step() {
         let entries: Vec<LibraryEntry> = (0..50).map(|i| entry(&format!("E{i:02}"))).collect();
-        let mut app = LibraryApp::new(entries, (80, 24));
+        let mut app = LibraryApp::new_with(entries, (80, 24), None, None);
         app.handle(Action::PageNext);
         assert_eq!(app.selection(), 10);
     }
 
     #[test]
     fn reset_for_reselection_clears_completion_state() {
-        let mut app = LibraryApp::new(
+        let mut app = LibraryApp::new_with(
             vec![entry("A"), entry("B"), entry("C")],
             (80, 24),
+            None,
+            None,
         );
         app.handle(Action::LineDown);
         app.handle(Action::Confirm);
@@ -333,14 +328,11 @@ mod tests {
 
     #[test]
     fn set_viewport_updates_viewport_size() {
-        let mut app = LibraryApp::new(vec![entry("A")], (80, 24));
+        let mut app = LibraryApp::new_with(vec![entry("A")], (80, 24), None, None);
         assert_eq!(app.viewport_size(), (80, 24));
         app.set_viewport((100, 30));
         assert_eq!(app.viewport_size(), (100, 30));
     }
-
-    use crate::prefs::PrefsStore;
-    use std::path::Path;
 
     fn fresh_prefs(dir: &Path) -> PrefsStore {
         PrefsStore::open_at(dir.join("prefs.json"))
@@ -410,5 +402,19 @@ mod tests {
         );
         app.handle(Action::ToggleViewMode);
         assert!(app.save_error().is_none());
+    }
+
+    #[test]
+    fn toggle_view_mode_without_prefs_still_flips_and_does_not_panic() {
+        let mut app = LibraryApp::new_with(
+            vec![entry("A")],
+            (80, 24),
+            None,
+            None,
+        );
+        assert_eq!(app.view_mode(), ViewMode::Grid);
+        app.handle(Action::ToggleViewMode);
+        assert_eq!(app.view_mode(), ViewMode::List);
+        assert!(app.save_error().is_none(), "save_error must stay None when prefs are absent");
     }
 }
