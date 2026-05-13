@@ -114,6 +114,10 @@ impl LibraryApp {
         self.cover_cache.as_mut()
     }
 
+    pub fn book_ids(&self) -> &[Option<BookId>] {
+        &self.book_ids
+    }
+
     pub fn save_error(&self) -> Option<&str> {
         self.save_error.as_deref()
     }

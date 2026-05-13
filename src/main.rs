@@ -223,6 +223,10 @@ fn library_event_loop(
                 cleader::reader::LibraryRenderInput {
                     entries: app.entries(),
                     selection: app.selection(),
+                    view_mode: app.view_mode(),
+                    cover_cache: app.cover_cache(),
+                    book_ids: app.book_ids(),
+                    warning: app.save_error(),
                 },
             );
         })?;

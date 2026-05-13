@@ -643,9 +643,32 @@ pub fn body_text_width(terminal_width: u16, max_body_width: u16) -> u16 {
 pub struct LibraryRenderInput<'a> {
     pub entries: &'a [crate::library::LibraryEntry],
     pub selection: usize,
+    pub view_mode: crate::prefs::ViewMode,
+    /// Optional — `None` disables grid rendering even when view_mode == Grid
+    /// (forces list fallback). Provided in production by `LibraryApp`.
+    pub cover_cache: Option<&'a crate::cover_cache::CoverCache>,
+    /// Lookup from entry index → BookId. Used to ask the cache for the
+    /// cover. Index outside the slice maps to None.
+    pub book_ids: &'a [Option<crate::epub::BookId>],
+    /// Optional warning to surface in the footer (e.g. prefs save error).
+    pub warning: Option<&'a str>,
 }
 
 pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'_>) {
+    use crate::prefs::ViewMode;
+    let force_list = area.width < CELL_WIDTH || area.height < (CELL_HEIGHT + 2);
+    match (input.view_mode, force_list) {
+        (ViewMode::Grid, false) => render_library_grid(frame, area, input),
+        _ => render_library_list(frame, area, input),
+    }
+}
+
+/// Cell width and height for the grid view. 24x16 = 22x14 inside the
+/// 1-col border, split into a 22x12 cover region and a 22x2 title region.
+pub const CELL_WIDTH: u16 = 24;
+pub const CELL_HEIGHT: u16 = 16;
+
+fn render_library_list(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'_>) {
     // Layout: title bar (1 row), list (rest), footer (1 row).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -663,7 +686,7 @@ pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'
     );
     frame.render_widget(Paragraph::new(Line::from(title)), chunks[0]);
 
-    // List body: render entries with selection highlight + scroll.
+    // List body.
     let visible_rows = chunks[1].height as usize;
     let scroll = center_scroll(input.selection, input.entries.len(), visible_rows);
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible_rows);
@@ -688,12 +711,198 @@ pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'
         chunks[1],
     );
 
-    // Footer hint.
-    let footer = TuiSpan::styled(
-        " Enter open · ↑↓ navigate · q quit ",
-        Style::default().add_modifier(Modifier::DIM),
+    // Footer hint or warning.
+    let footer_text = match input.warning {
+        Some(msg) => format!(" ! {msg} ! "),
+        None => " Enter open · ↑↓ navigate · g grid · q quit ".to_string(),
+    };
+    let style = if input.warning.is_some() {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().add_modifier(Modifier::DIM)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(TuiSpan::styled(footer_text, style))),
+        chunks[2],
     );
-    frame.render_widget(Paragraph::new(Line::from(footer)), chunks[2]);
+}
+
+fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'_>) {
+    use crate::cover_cache::{COVER_THUMBNAIL_HEIGHT, COVER_THUMBNAIL_WIDTH, PLACEHOLDER};
+
+    // Outer layout: title (1), grid body (Min 1), footer (1).
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(CELL_HEIGHT),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    // Title bar.
+    let title = TuiSpan::styled(
+        format!(" cleader library — {} book(s) ", input.entries.len()),
+        Style::default().add_modifier(Modifier::BOLD),
+    );
+    frame.render_widget(Paragraph::new(Line::from(title)), outer[0]);
+
+    // Grid math.
+    let grid_area = outer[1];
+    let cols = (grid_area.width / CELL_WIDTH).max(1) as usize;
+    let rows = (grid_area.height / CELL_HEIGHT).max(1) as usize;
+    let cells_per_screen = cols * rows;
+    let total = input.entries.len();
+
+    // Page-snapping scroll: top-of-screen index is the start of the row
+    // containing the current selection, rounded down to the nearest
+    // full page boundary.
+    let selection_row = input.selection / cols;
+    let top_row = (selection_row / rows) * rows;
+    let first_idx = top_row * cols;
+    let last_idx = (first_idx + cells_per_screen).min(total);
+
+    // Build a vertical stack of horizontal cell rows.
+    let mut cell_rects: Vec<Rect> = Vec::with_capacity(cells_per_screen);
+    let row_constraints: Vec<Constraint> = (0..rows)
+        .map(|_| Constraint::Length(CELL_HEIGHT))
+        .collect();
+    let row_rects = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(row_constraints)
+        .split(grid_area);
+    for row_rect in row_rects.iter() {
+        let col_constraints: Vec<Constraint> = (0..cols)
+            .map(|_| Constraint::Length(CELL_WIDTH))
+            .collect();
+        let col_rects = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(col_constraints)
+            .split(*row_rect);
+        for r in col_rects.iter() {
+            cell_rects.push(*r);
+        }
+    }
+
+    // Render each visible cell.
+    for (offset, abs_idx) in (first_idx..last_idx).enumerate() {
+        let Some(cell_rect) = cell_rects.get(offset) else { break; };
+        let entry = &input.entries[abs_idx];
+        let is_selected = abs_idx == input.selection;
+
+        let border_style = if is_selected {
+            Style::default().fg(ratatui::style::Color::Yellow)
+        } else {
+            Style::default()
+        };
+        let block = TuiBlock::default()
+            .borders(Borders::ALL)
+            .border_style(border_style);
+
+        // Render the outer block, then render inner content into the inner rect.
+        let inner = block.inner(*cell_rect);
+        frame.render_widget(block, *cell_rect);
+
+        // Split inner into cover region (top 12 rows) + title region (rest).
+        let cell_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(COVER_THUMBNAIL_HEIGHT),
+                Constraint::Min(1),
+            ])
+            .split(inner);
+
+        // Cover: real if Ready, else placeholder.
+        let cover_lines: Vec<Line<'static>> = {
+            let cached = input
+                .book_ids
+                .get(abs_idx)
+                .and_then(|opt| opt.as_ref())
+                .and_then(|id| input.cover_cache.and_then(|c| c.get(id)));
+            match cached {
+                Some(lines) => lines
+                    .iter()
+                    .take(COVER_THUMBNAIL_HEIGHT as usize)
+                    .map(|l| Line::from(l.clone()))
+                    .collect(),
+                None => PLACEHOLDER
+                    .iter()
+                    .map(|s| {
+                        Line::from(TuiSpan::styled(
+                            s.to_string(),
+                            Style::default().add_modifier(Modifier::DIM),
+                        ))
+                    })
+                    .collect(),
+            }
+        };
+        frame.render_widget(Paragraph::new(cover_lines), cell_chunks[0]);
+
+        // Title region: title (bold, possibly REVERSED), author (DIM).
+        let title_style = if is_selected {
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        };
+        let title_truncated = truncate_to_width(&entry.title, COVER_THUMBNAIL_WIDTH as usize);
+        let author_truncated = truncate_to_width(&entry.author, COVER_THUMBNAIL_WIDTH as usize);
+        let title_lines = vec![
+            Line::from(TuiSpan::styled(title_truncated, title_style)),
+            Line::from(TuiSpan::styled(
+                author_truncated,
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(title_lines), cell_chunks[1]);
+    }
+
+    // Footer.
+    let footer_text = match input.warning {
+        Some(msg) => format!(" ! {msg} ! "),
+        None => " Enter open · ↑↓ navigate · g list · q quit ".to_string(),
+    };
+    let style = if input.warning.is_some() {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().add_modifier(Modifier::DIM)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(TuiSpan::styled(footer_text, style))),
+        outer[2],
+    );
+}
+
+/// Truncate a string to fit within `max_cols` display columns. Uses
+/// unicode-width; appends "…" if anything was cut.
+fn truncate_to_width(s: &str, max_cols: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    // Collect (char, width) pairs so we can back-fill the ellipsis.
+    let chars_widths: Vec<(char, usize)> = s
+        .chars()
+        .map(|ch| (ch, UnicodeWidthChar::width(ch).unwrap_or(0)))
+        .collect();
+
+    let total_width: usize = chars_widths.iter().map(|(_, w)| w).sum();
+    if total_width <= max_cols {
+        // Fits as-is.
+        return s.to_string();
+    }
+
+    // Needs truncation. Reserve 1 column for the '…'.
+    let budget = max_cols.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0usize;
+    for (ch, cw) in &chars_widths {
+        if used + cw > budget {
+            break;
+        }
+        out.push(*ch);
+        used += cw;
+    }
+    out.push('…');
+    out
 }
 
 
@@ -1391,7 +1600,130 @@ mod tests {
                     },
                 ],
                 selection: 0,
+                view_mode: crate::prefs::ViewMode::List,
+                cover_cache: None,
+                book_ids: &[None],
+                warning: None,
             });
         }).unwrap();
+    }
+
+    use crate::cover_cache::CoverCache;
+    use crate::epub::BookId;
+    use crate::library::LibraryEntry;
+    use crate::prefs::ViewMode;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::path::PathBuf;
+
+    fn lib_entry(title: &str) -> LibraryEntry {
+        LibraryEntry {
+            path: PathBuf::from(format!("/tmp/{title}.epub")),
+            title: title.to_string(),
+            author: "Anon".to_string(),
+        }
+    }
+
+    #[test]
+    fn render_library_grid_does_not_panic_on_tiny_terminal() {
+        // 4x4 is well below CELL_WIDTH x CELL_HEIGHT (24x16) — dispatcher
+        // falls back to list rendering. Must not panic.
+        let backend = TestBackend::new(4, 4);
+        let mut term = Terminal::new(backend).unwrap();
+        let entries = vec![lib_entry("A"), lib_entry("B")];
+        term.draw(|frame| {
+            let area = frame.area();
+            render_library(
+                frame,
+                area,
+                LibraryRenderInput {
+                    entries: &entries,
+                    selection: 0,
+                    view_mode: ViewMode::Grid,
+                    cover_cache: None,
+                    book_ids: &[None, None],
+                    warning: None,
+                },
+            );
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn render_library_grid_renders_on_80x24_without_panic() {
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        let entries: Vec<_> = (0..6).map(|i| lib_entry(&format!("Book{i}"))).collect();
+        let book_ids: Vec<Option<BookId>> = (0..entries.len()).map(|_| None).collect();
+        term.draw(|frame| {
+            let area = frame.area();
+            render_library(
+                frame,
+                area,
+                LibraryRenderInput {
+                    entries: &entries,
+                    selection: 0,
+                    view_mode: ViewMode::Grid,
+                    cover_cache: None,
+                    book_ids: &book_ids,
+                    warning: None,
+                },
+            );
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn render_library_grid_uses_cover_cache_when_available() {
+        // Pre-populate a cache with a known cover for one entry, render,
+        // and verify the cover lines appear in the rendered buffer.
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = CoverCache::open_at(dir.path().to_path_buf());
+        let id = BookId::from_bytes(b"book-a");
+        // Write a deliberately-recognizable cover row to disk so the
+        // cache picks it up via enqueue (synchronous disk-hit path).
+        let lines: Vec<String> = (0..12)
+            .map(|i| format!("ROW{i:02}{}", " ".repeat(17)))
+            .collect();
+        crate::cover_cache::write_cached(dir.path(), &id, &lines).unwrap();
+        cache.enqueue(id.clone(), PathBuf::from("/tmp/book-a.epub"));
+
+        let entries = vec![lib_entry("Book A")];
+        let book_ids = vec![Some(id.clone())];
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|frame| {
+            let area = frame.area();
+            render_library(
+                frame,
+                area,
+                LibraryRenderInput {
+                    entries: &entries,
+                    selection: 0,
+                    view_mode: ViewMode::Grid,
+                    cover_cache: Some(&cache),
+                    book_ids: &book_ids,
+                    warning: None,
+                },
+            );
+        })
+        .unwrap();
+
+        // Buffer should contain "ROW00" somewhere — the first row of our
+        // injected cover.
+        let buffer_text: String = term.backend().buffer().content.iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            buffer_text.contains("ROW00"),
+            "rendered buffer should contain injected cover row, got:\n{buffer_text}"
+        );
+    }
+
+    #[test]
+    fn truncate_to_width_appends_ellipsis_when_cut() {
+        assert_eq!(truncate_to_width("hello world", 5), "hell…");
+        assert_eq!(truncate_to_width("hi", 5), "hi");
+        assert_eq!(truncate_to_width("", 5), "");
     }
 }
