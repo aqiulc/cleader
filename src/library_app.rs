@@ -6,12 +6,16 @@
 //! the regular Reader with that book. On Esc/q/Ctrl+C, the app quits
 //! with no selection.
 
+use crate::cover_cache::CoverCache;
+use crate::epub::BookId;
 use crate::input::Action;
 use crate::library::LibraryEntry;
+use crate::prefs::{PrefsStore, ViewMode};
 use std::path::PathBuf;
 
 pub struct LibraryApp {
     entries: Vec<LibraryEntry>,
+    book_ids: Vec<Option<BookId>>,
     selection: usize,
     viewport_size: (u16, u16),
     should_quit: bool,
@@ -19,16 +23,64 @@ pub struct LibraryApp {
     /// dispatcher reads this after the event loop exits to decide
     /// whether to launch the Reader.
     selected_path: Option<PathBuf>,
+    view_mode: ViewMode,
+    cover_cache: Option<CoverCache>,
+    prefs: Option<PrefsStore>,
+    save_error: Option<String>,
 }
 
 impl LibraryApp {
+    /// Production constructor: opens PrefsStore and CoverCache from the
+    /// OS data dir. Falls back to disabled cache (grid view degrades to
+    /// list) if the OS data dir is unavailable. Prefs failure falls back
+    /// to default (ViewMode::Grid).
     pub fn new(entries: Vec<LibraryEntry>, viewport: (u16, u16)) -> Self {
+        let prefs = PrefsStore::open().ok();
+        let view_mode = prefs
+            .as_ref()
+            .map(|p| p.view_mode())
+            .unwrap_or_default();
+        let cover_cache = CoverCache::open();
+        let book_ids = vec![None; entries.len()];
         Self {
             entries,
+            book_ids,
             selection: 0,
             viewport_size: viewport,
             should_quit: false,
             selected_path: None,
+            view_mode,
+            cover_cache,
+            prefs,
+            save_error: None,
+        }
+    }
+
+    /// Test/internal constructor: caller injects prefs and cache (or
+    /// `None`s for a minimal smoke harness).
+    #[doc(hidden)]
+    pub fn new_with(
+        entries: Vec<LibraryEntry>,
+        viewport: (u16, u16),
+        prefs: Option<PrefsStore>,
+        cover_cache: Option<CoverCache>,
+    ) -> Self {
+        let view_mode = prefs
+            .as_ref()
+            .map(|p| p.view_mode())
+            .unwrap_or_default();
+        let book_ids = vec![None; entries.len()];
+        Self {
+            entries,
+            book_ids,
+            selection: 0,
+            viewport_size: viewport,
+            should_quit: false,
+            selected_path: None,
+            view_mode,
+            cover_cache,
+            prefs,
+            save_error: None,
         }
     }
 
@@ -68,6 +120,68 @@ impl LibraryApp {
         self.viewport_size = viewport;
     }
 
+    pub fn view_mode(&self) -> ViewMode {
+        self.view_mode
+    }
+
+    pub fn cover_cache(&self) -> Option<&CoverCache> {
+        self.cover_cache.as_ref()
+    }
+
+    pub fn cover_cache_mut(&mut self) -> Option<&mut CoverCache> {
+        self.cover_cache.as_mut()
+    }
+
+    pub fn save_error(&self) -> Option<&str> {
+        self.save_error.as_deref()
+    }
+
+    /// Request covers for the given entry indices. Resolves each index
+    /// to a `BookId` (lazily — computed once and stored in
+    /// `self.book_ids[idx]`), then calls `enqueue`. Indices out of range
+    /// are silently skipped.
+    pub fn request_visible_covers(&mut self, indices: impl IntoIterator<Item = usize>) {
+        let Some(cache) = self.cover_cache.as_mut() else {
+            return;
+        };
+        for idx in indices {
+            let Some(entry) = self.entries.get(idx) else {
+                continue;
+            };
+            // Lazy-compute the BookId from the file bytes the first
+            // time we need it. Failure (e.g. file moved) just skips.
+            if self.book_ids[idx].is_none() {
+                if let Ok(bytes) = std::fs::read(&entry.path) {
+                    self.book_ids[idx] = Some(BookId::from_bytes(&bytes));
+                }
+            }
+            if let Some(id) = &self.book_ids[idx] {
+                cache.enqueue(id.clone(), entry.path.clone());
+            }
+        }
+    }
+
+    /// Look up an already-computed BookId for an entry. Returns None if
+    /// `request_visible_covers` hasn't been called for this index yet or
+    /// if the file couldn't be read.
+    pub fn book_id(&self, idx: usize) -> Option<&BookId> {
+        self.book_ids.get(idx).and_then(|opt| opt.as_ref())
+    }
+
+    fn toggle_view_mode(&mut self) {
+        self.view_mode = match self.view_mode {
+            ViewMode::Grid => ViewMode::List,
+            ViewMode::List => ViewMode::Grid,
+        };
+        if let Some(prefs) = self.prefs.as_mut() {
+            if let Err(e) = prefs.set_view_mode(self.view_mode) {
+                self.save_error = Some(format!("could not save prefs: {e}"));
+            } else {
+                self.save_error = None;
+            }
+        }
+    }
+
     pub fn handle(&mut self, action: Action) {
         match action {
             Action::LineUp => {
@@ -102,8 +216,7 @@ impl LibraryApp {
                 self.viewport_size = (w, h);
             }
             Action::ToggleViewMode => {
-                // Temporary no-op; v0.4.4 Task 5 replaces this with the
-                // real handler that toggles between list and grid view.
+                self.toggle_view_mode();
             }
             // Reader-only actions are no-ops in library mode.
             Action::ChapterNext
@@ -224,5 +337,78 @@ mod tests {
         assert_eq!(app.viewport_size(), (80, 24));
         app.set_viewport((100, 30));
         assert_eq!(app.viewport_size(), (100, 30));
+    }
+
+    use crate::prefs::PrefsStore;
+    use std::path::Path;
+
+    fn fresh_prefs(dir: &Path) -> PrefsStore {
+        PrefsStore::open_at(dir.join("prefs.json"))
+    }
+
+    #[test]
+    fn toggle_view_mode_flips_grid_to_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefs = fresh_prefs(dir.path());
+        let mut app = LibraryApp::new_with(
+            vec![entry("A")],
+            (80, 24),
+            Some(prefs),
+            None,
+        );
+        assert_eq!(app.view_mode(), ViewMode::Grid);
+        app.handle(Action::ToggleViewMode);
+        assert_eq!(app.view_mode(), ViewMode::List);
+        app.handle(Action::ToggleViewMode);
+        assert_eq!(app.view_mode(), ViewMode::Grid);
+    }
+
+    #[test]
+    fn toggle_view_mode_persists_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let prefs = PrefsStore::open_at(path.clone());
+        let mut app = LibraryApp::new_with(
+            vec![entry("A")],
+            (80, 24),
+            Some(prefs),
+            None,
+        );
+        app.handle(Action::ToggleViewMode);
+        // Re-open the store from disk and verify.
+        let reloaded = PrefsStore::open_at(path);
+        assert_eq!(reloaded.view_mode(), ViewMode::List);
+    }
+
+    #[test]
+    fn request_visible_covers_is_noop_with_no_cache() {
+        // Without a cover_cache (the test fallback), this must not panic.
+        let mut app = LibraryApp::new_with(
+            vec![entry("A"), entry("B")],
+            (80, 24),
+            None,
+            None,
+        );
+        app.request_visible_covers(0..2);
+        assert!(app.book_id(0).is_none(), "no cache → no book_id resolution");
+    }
+
+    #[test]
+    fn view_mode_defaults_to_grid_without_prefs() {
+        let app = LibraryApp::new_with(vec![entry("A")], (80, 24), None, None);
+        assert_eq!(app.view_mode(), ViewMode::Grid);
+    }
+
+    #[test]
+    fn save_error_is_none_after_successful_toggle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = LibraryApp::new_with(
+            vec![entry("A")],
+            (80, 24),
+            Some(fresh_prefs(dir.path())),
+            None,
+        );
+        app.handle(Action::ToggleViewMode);
+        assert!(app.save_error().is_none());
     }
 }
