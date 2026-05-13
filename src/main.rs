@@ -214,25 +214,74 @@ fn library_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut cleader::library_app::LibraryApp,
 ) -> anyhow::Result<()> {
+    use cleader::reader::{CELL_HEIGHT, CELL_WIDTH};
     while !app.should_quit() {
+        // Drain any covers the worker finished since the last frame.
+        // If new covers arrived, we still redraw below — the drain just
+        // moves them from the channel into the in-memory map.
+        if let Some(cache) = app.cover_cache_mut() {
+            cache.drain_finished();
+        }
+
+        // Compute the indices of currently-visible entries so we can
+        // ask the cache to start generating their covers if they're
+        // not already cached. The math mirrors render_library_grid.
+        let (term_w, term_h) = terminal
+            .size()
+            .map(|s| (s.width, s.height))
+            .unwrap_or((80, 24));
+        let view_mode = app.view_mode();
+        if matches!(view_mode, cleader::prefs::ViewMode::Grid)
+            && term_w >= CELL_WIDTH
+            && term_h >= CELL_HEIGHT + 2
+        {
+            // Reserve 2 rows for title + footer.
+            let grid_h = term_h.saturating_sub(2);
+            let cols = (term_w / CELL_WIDTH).max(1) as usize;
+            let rows = (grid_h / CELL_HEIGHT).max(1) as usize;
+            let total = app.entries().len();
+            let selection = app.selection();
+            let selection_row = selection / cols;
+            let top_row = (selection_row / rows) * rows;
+            let first = top_row * cols;
+            let last = (first + cols * rows).min(total);
+            app.request_visible_covers(first..last);
+        }
+
+        // Snapshot fields we need inside the draw closure (avoids
+        // borrowing app twice).
+        let entries_snapshot: Vec<_> = app.entries().to_vec();
+        let book_ids_snapshot: Vec<Option<cleader::epub::BookId>> = (0..app.entries().len())
+            .map(|i| app.book_id(i).cloned())
+            .collect();
+        let selection = app.selection();
+        let view_mode = app.view_mode();
+        let warning_owned = app.save_error().map(|s| s.to_string());
+        let cover_cache = app.cover_cache();
+
         terminal.draw(|frame| {
             let area = frame.area();
             cleader::reader::render_library(
                 frame,
                 area,
                 cleader::reader::LibraryRenderInput {
-                    entries: app.entries(),
-                    selection: app.selection(),
-                    view_mode: app.view_mode(),
-                    cover_cache: app.cover_cache(),
-                    book_ids: app.book_ids(),
-                    warning: app.save_error(),
+                    entries: &entries_snapshot,
+                    selection,
+                    view_mode,
+                    cover_cache,
+                    book_ids: &book_ids_snapshot,
+                    warning: warning_owned.as_deref(),
                 },
             );
         })?;
-        let evt = event::read()?;
-        if let Some(action) = translate(evt) {
-            app.handle(action);
+
+        // Poll for input with a 50 ms timeout. If nothing comes, loop
+        // back so we can drain newly-finished covers and redraw.
+        if event::poll(std::time::Duration::from_millis(50))? {
+            let evt = event::read()?;
+            if let Some(action) = translate(evt) {
+                app.handle(action);
+            }
         }
     }
     Ok(())
