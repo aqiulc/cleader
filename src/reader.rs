@@ -318,26 +318,12 @@ pub fn build_status_bar(s: StatusInput<'_>) -> String {
     out
 }
 
-fn truncate_right(s: &str, budget: usize) -> String {
-    if budget == 0 {
-        return String::new();
-    }
-    if UnicodeWidthStr::width(s) <= budget {
-        return s.to_string();
-    }
-    // Reserve 1 column for the ellipsis.
-    let mut acc = String::new();
-    let mut w = 0usize;
-    for ch in s.chars() {
-        let cw = UnicodeWidthStr::width(ch.to_string().as_str());
-        if w + cw + 1 > budget {
-            break;
-        }
-        acc.push(ch);
-        w += cw;
-    }
-    acc.push('…');
-    acc
+/// Truncate a string to fit within `max_cols` display columns.
+/// Delegates to `truncate_to_width`; kept as a named alias so existing
+/// callsites don't need a touch-up. Prefer `truncate_to_width` for
+/// new code.
+fn truncate_right(s: &str, max_cols: usize) -> String {
+    truncate_to_width(s, max_cols)
 }
 
 pub struct RenderInput<'a> {
@@ -909,7 +895,13 @@ fn truncate_to_width(s: &str, max_cols: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::epub::Span;
+    use crate::cover_cache::CoverCache;
+    use crate::epub::{BookId, Span};
+    use crate::library::LibraryEntry;
+    use crate::prefs::ViewMode;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::path::PathBuf;
 
     fn pgraph(text: &str) -> Block {
         Block::Paragraph { spans: vec![Span::plain(text)] }
@@ -1584,9 +1576,6 @@ mod tests {
 
     #[test]
     fn library_render_does_not_panic_on_narrow_terminal() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        use crate::library::LibraryEntry;
         let backend = TestBackend::new(10, 4);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| {
@@ -1594,27 +1583,19 @@ mod tests {
             render_library(frame, area, LibraryRenderInput {
                 entries: &[
                     LibraryEntry {
-                        path: std::path::PathBuf::from("/a.epub"),
+                        path: PathBuf::from("/a.epub"),
                         title: "A".into(),
                         author: "X".into(),
                     },
                 ],
                 selection: 0,
-                view_mode: crate::prefs::ViewMode::List,
+                view_mode: ViewMode::List,
                 cover_cache: None,
                 book_ids: &[None],
                 warning: None,
             });
         }).unwrap();
     }
-
-    use crate::cover_cache::CoverCache;
-    use crate::epub::BookId;
-    use crate::library::LibraryEntry;
-    use crate::prefs::ViewMode;
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
-    use std::path::PathBuf;
 
     fn lib_entry(title: &str) -> LibraryEntry {
         LibraryEntry {
@@ -1725,5 +1706,42 @@ mod tests {
         assert_eq!(truncate_to_width("hello world", 5), "hell…");
         assert_eq!(truncate_to_width("hi", 5), "hi");
         assert_eq!(truncate_to_width("", 5), "");
+    }
+
+    #[test]
+    fn library_footer_shows_warning_in_both_modes() {
+        // Verifies the `warning: Option<&str>` field surfaces in the
+        // footer for both render variants.
+        let entries = vec![lib_entry("A")];
+        let book_ids = vec![None];
+
+        for view_mode in [ViewMode::List, ViewMode::Grid] {
+            let backend = TestBackend::new(80, 24);
+            let mut term = Terminal::new(backend).unwrap();
+            term.draw(|frame| {
+                let area = frame.area();
+                render_library(
+                    frame,
+                    area,
+                    LibraryRenderInput {
+                        entries: &entries,
+                        selection: 0,
+                        view_mode,
+                        cover_cache: None,
+                        book_ids: &book_ids,
+                        warning: Some("could not save prefs: oh no"),
+                    },
+                );
+            })
+            .unwrap();
+
+            let buffer_text: String = term.backend().buffer().content.iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(
+                buffer_text.contains("could not save prefs: oh no"),
+                "{view_mode:?} footer should contain warning, got:\n{buffer_text}"
+            );
+        }
     }
 }
