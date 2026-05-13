@@ -317,7 +317,7 @@ impl App {
                 // features may bind it elsewhere.
             }
             Action::ToggleViewMode => {
-                // No-op in reader mode; library mode handles this in Task 5.
+                // No-op in reader mode; library mode handles this in library_app.rs.
             }
             Action::Quit => {
                 if self.show_help {

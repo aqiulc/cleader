@@ -15,6 +15,9 @@ use std::path::PathBuf;
 
 pub struct LibraryApp {
     entries: Vec<LibraryEntry>,
+    /// Parallel to `entries`: `book_ids[i]` is the BookId for `entries[i]`,
+    /// computed lazily on first call to `request_visible_covers(i)`.
+    /// Length always equals `entries.len()`.
     book_ids: Vec<Option<BookId>>,
     selection: usize,
     viewport_size: (u16, u16),
@@ -156,6 +159,7 @@ impl LibraryApp {
     /// Look up an already-computed BookId for an entry. Returns None if
     /// `request_visible_covers` hasn't been called for this index yet or
     /// if the file couldn't be read.
+    #[doc(hidden)]
     pub fn book_id(&self, idx: usize) -> Option<&BookId> {
         self.book_ids.get(idx).and_then(|opt| opt.as_ref())
     }

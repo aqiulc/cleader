@@ -870,7 +870,12 @@ fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
                 Style::default().add_modifier(Modifier::DIM),
             )),
         ];
-        frame.render_widget(Paragraph::new(title_lines), cell_chunks[1]);
+        // Add a single-row divider above the title block (per spec) so
+        // covers and titles don't visually run together.
+        let title_block = TuiBlock::default().borders(Borders::TOP);
+        let title_inner = title_block.inner(cell_chunks[1]);
+        frame.render_widget(title_block, cell_chunks[1]);
+        frame.render_widget(Paragraph::new(title_lines), title_inner);
     }
 
     // Footer.
