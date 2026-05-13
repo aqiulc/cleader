@@ -178,26 +178,54 @@ impl LibraryApp {
         }
     }
 
+    /// Compute columns currently used by the grid renderer. Returns 1
+    /// in list mode or when the terminal is too narrow for a single
+    /// grid cell (in which case grid mode falls back to list anyway).
+    fn grid_cols(&self) -> usize {
+        let cell_width = crate::reader::CELL_WIDTH as usize;
+        (self.viewport_size.0 as usize / cell_width).max(1)
+    }
+
     pub fn handle(&mut self, action: Action) {
         match action {
             Action::LineUp => {
-                if self.selection > 0 {
+                if matches!(self.view_mode, ViewMode::Grid) {
+                    let cols = self.grid_cols();
+                    self.selection = self.selection.saturating_sub(cols);
+                } else if self.selection > 0 {
                     self.selection -= 1;
                 }
             }
             Action::LineDown => {
-                if self.selection + 1 < self.entries.len() {
+                if matches!(self.view_mode, ViewMode::Grid) {
+                    let cols = self.grid_cols();
+                    let max = self.entries.len().saturating_sub(1);
+                    self.selection = (self.selection + cols).min(max);
+                } else if self.selection + 1 < self.entries.len() {
                     self.selection += 1;
                 }
             }
             Action::PagePrev => {
-                let step = self.lines_per_page().min(10);
-                self.selection = self.selection.saturating_sub(step);
+                if matches!(self.view_mode, ViewMode::Grid) {
+                    if self.selection > 0 {
+                        self.selection -= 1;
+                    }
+                } else {
+                    let step = self.lines_per_page().min(10);
+                    self.selection = self.selection.saturating_sub(step);
+                }
             }
             Action::PageNext => {
-                let step = self.lines_per_page().min(10);
-                let max = self.entries.len().saturating_sub(1);
-                self.selection = (self.selection + step).min(max);
+                if matches!(self.view_mode, ViewMode::Grid) {
+                    let max = self.entries.len().saturating_sub(1);
+                    if self.selection < max {
+                        self.selection += 1;
+                    }
+                } else {
+                    let step = self.lines_per_page().min(10);
+                    let max = self.entries.len().saturating_sub(1);
+                    self.selection = (self.selection + step).min(max);
+                }
             }
             Action::Confirm => {
                 if let Some(entry) = self.entries.get(self.selection) {
@@ -243,12 +271,15 @@ mod tests {
 
     #[test]
     fn line_down_moves_selection() {
+        // In list mode, LineDown moves by exactly 1.
+        let dir = tempfile::tempdir().unwrap();
         let mut app = LibraryApp::new_with(
             vec![entry("A"), entry("B"), entry("C")],
             (80, 24),
-            None,
+            Some(fresh_prefs(dir.path())),
             None,
         );
+        app.handle(Action::ToggleViewMode); // → List
         assert_eq!(app.selection(), 0);
         app.handle(Action::LineDown);
         assert_eq!(app.selection(), 1);
@@ -256,7 +287,15 @@ mod tests {
 
     #[test]
     fn line_down_clamps_at_end() {
-        let mut app = LibraryApp::new_with(vec![entry("A"), entry("B")], (80, 24), None, None);
+        // In list mode, LineDown clamps at the last entry.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = LibraryApp::new_with(
+            vec![entry("A"), entry("B")],
+            (80, 24),
+            Some(fresh_prefs(dir.path())),
+            None,
+        );
+        app.handle(Action::ToggleViewMode); // → List
         app.handle(Action::LineDown);
         app.handle(Action::LineDown);
         app.handle(Action::LineDown);
@@ -272,12 +311,15 @@ mod tests {
 
     #[test]
     fn confirm_sets_selected_path_and_should_quit() {
+        // In list mode, LineDown moves by 1 so we land on entry B.
+        let dir = tempfile::tempdir().unwrap();
         let mut app = LibraryApp::new_with(
             vec![entry("A"), entry("B"), entry("C")],
             (80, 24),
-            None,
+            Some(fresh_prefs(dir.path())),
             None,
         );
+        app.handle(Action::ToggleViewMode); // → List
         app.handle(Action::LineDown);
         app.handle(Action::Confirm);
         assert!(app.should_quit());
@@ -304,8 +346,11 @@ mod tests {
 
     #[test]
     fn page_next_advances_by_step() {
+        // PageNext in list mode jumps by a page (min(lines_per_page, 10) = 10).
         let entries: Vec<LibraryEntry> = (0..50).map(|i| entry(&format!("E{i:02}"))).collect();
-        let mut app = LibraryApp::new_with(entries, (80, 24), None, None);
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = LibraryApp::new_with(entries, (80, 24), Some(fresh_prefs(dir.path())), None);
+        app.handle(Action::ToggleViewMode); // → List
         app.handle(Action::PageNext);
         assert_eq!(app.selection(), 10);
     }
@@ -424,5 +469,66 @@ mod tests {
         app.handle(Action::ToggleViewMode);
         assert_eq!(app.view_mode(), ViewMode::List);
         assert!(app.save_error().is_none(), "save_error must stay None when prefs are absent");
+    }
+
+    #[test]
+    fn grid_mode_line_down_moves_by_cols() {
+        // viewport 80 wide → 80/24 = 3 cols
+        let entries: Vec<LibraryEntry> = (0..10)
+            .map(|i| entry(&format!("E{i:02}")))
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = LibraryApp::new_with(
+            entries,
+            (80, 24),
+            Some(fresh_prefs(dir.path())),
+            None,
+        );
+        assert_eq!(app.view_mode(), ViewMode::Grid);
+        assert_eq!(app.selection(), 0);
+        app.handle(Action::LineDown);
+        assert_eq!(app.selection(), 3, "LineDown in grid should move by cols (3 on 80-wide)");
+        app.handle(Action::LineUp);
+        assert_eq!(app.selection(), 0);
+    }
+
+    #[test]
+    fn grid_mode_page_next_moves_one_cell() {
+        let entries: Vec<LibraryEntry> = (0..10)
+            .map(|i| entry(&format!("E{i:02}")))
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = LibraryApp::new_with(
+            entries,
+            (80, 24),
+            Some(fresh_prefs(dir.path())),
+            None,
+        );
+        assert_eq!(app.selection(), 0);
+        app.handle(Action::PageNext);
+        assert_eq!(app.selection(), 1, "PageNext in grid should move 1 cell right");
+        app.handle(Action::PagePrev);
+        assert_eq!(app.selection(), 0);
+    }
+
+    #[test]
+    fn list_mode_navigation_still_works_as_before() {
+        // After toggling to list mode, LineDown moves by 1, PageNext jumps a page.
+        let entries: Vec<LibraryEntry> = (0..50)
+            .map(|i| entry(&format!("E{i:02}")))
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = LibraryApp::new_with(
+            entries,
+            (80, 24),
+            Some(fresh_prefs(dir.path())),
+            None,
+        );
+        app.handle(Action::ToggleViewMode); // → List
+        assert_eq!(app.view_mode(), ViewMode::List);
+        app.handle(Action::LineDown);
+        assert_eq!(app.selection(), 1);
+        app.handle(Action::PageNext);
+        assert!(app.selection() > 1, "PageNext in list should jump a page");
     }
 }

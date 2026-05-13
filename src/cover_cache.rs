@@ -236,15 +236,42 @@ fn worker_loop(
     }
 }
 
-/// Open the EPUB, extract the raw cover bytes, ASCII-render at
-/// `COVER_THUMBNAIL_WIDTH`. Returns `None` if the EPUB can't be
+/// Open the EPUB, extract the raw cover bytes, ASCII-render at a width
+/// chosen so the natural-aspect height fits in `COVER_THUMBNAIL_HEIGHT`
+/// rows. Pads each row to `COVER_THUMBNAIL_WIDTH` columns so the cover
+/// always fills the cell region. Returns `None` if the EPUB can't be
 /// opened, has no cover, or the cover can't be decoded by `image`.
 fn generate_cover(epub_path: &Path) -> Option<Vec<String>> {
     let mut doc = epub::doc::EpubDoc::new(epub_path).ok()?;
     let (bytes, _mime) = doc.get_cover()?;
-    let mut lines = crate::ascii_art::image_to_ascii(&bytes, COVER_THUMBNAIL_WIDTH).ok()?;
-    // Truncate or pad to COVER_THUMBNAIL_HEIGHT so the grid cell stays
-    // a fixed shape regardless of cover aspect.
+
+    // Decode just enough to learn the source aspect so we can pick a
+    // render width that fits in COVER_THUMBNAIL_HEIGHT rows.
+    let img = image::load_from_memory(&bytes).ok()?;
+    let (src_w, src_h) = (img.width().max(1), img.height().max(1));
+    let aspect = src_h as f32 / src_w as f32;
+    // image_to_ascii halves the height for terminal cell aspect, so
+    // produced rows = round(target_w * aspect * 0.5). Solve for the
+    // largest target_w that keeps rows <= COVER_THUMBNAIL_HEIGHT.
+    let max_w_for_height = (COVER_THUMBNAIL_HEIGHT as f32 * 2.0 / aspect).floor() as u16;
+    let target_w = max_w_for_height.clamp(1, COVER_THUMBNAIL_WIDTH);
+
+    let mut lines = crate::ascii_art::image_to_ascii(&bytes, target_w).ok()?;
+
+    // Center-pad each row to COVER_THUMBNAIL_WIDTH (letterbox horizontally).
+    let pad_total = (COVER_THUMBNAIL_WIDTH as usize).saturating_sub(target_w as usize);
+    let pad_left = pad_total / 2;
+    let pad_right = pad_total - pad_left;
+    for line in &mut lines {
+        let mut padded = String::with_capacity(COVER_THUMBNAIL_WIDTH as usize);
+        for _ in 0..pad_left { padded.push(' '); }
+        padded.push_str(line);
+        for _ in 0..pad_right { padded.push(' '); }
+        *line = padded;
+    }
+
+    // Pad height to COVER_THUMBNAIL_HEIGHT (letterbox vertically) so the
+    // grid cell is always a fixed shape. Truncate if somehow over.
     lines.truncate(COVER_THUMBNAIL_HEIGHT as usize);
     while lines.len() < COVER_THUMBNAIL_HEIGHT as usize {
         lines.push(" ".repeat(COVER_THUMBNAIL_WIDTH as usize));
