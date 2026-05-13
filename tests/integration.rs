@@ -236,3 +236,67 @@ fn wrap_pipeline_on_real_epub_respects_width() {
         }
     }
 }
+
+#[test]
+fn library_grid_renders_without_panic_when_directory_has_epubs() {
+    use cleader::cover_cache::CoverCache;
+    use cleader::library::scan_directory;
+    use cleader::library_app::LibraryApp;
+    use cleader::prefs::{PrefsStore, ViewMode};
+    use cleader::reader::{render_library, LibraryRenderInput};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let Some(book_path) = require_book(None) else { return; };
+    // Set up a tmp library dir with one real EPUB symlinked in.
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("book.epub");
+    std::fs::copy(&book_path, &dest).unwrap();
+
+    let entries = scan_directory(dir.path()).expect("scan");
+    assert!(!entries.is_empty(), "scan should find at least one EPUB");
+
+    let prefs_dir = tempfile::tempdir().unwrap();
+    let prefs = PrefsStore::open_at(prefs_dir.path().join("prefs.json"));
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cover_cache = CoverCache::open_at(cache_dir.path().to_path_buf());
+
+    let mut app = LibraryApp::new_with(entries, (80, 24), Some(prefs), Some(cover_cache));
+    app.request_visible_covers(0..1);
+    // Give the worker a moment so the cover may land in the cache.
+    for _ in 0..30 {
+        if let Some(cache) = app.cover_cache_mut() {
+            if cache.drain_finished() {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let backend = TestBackend::new(80, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    let entries_snapshot: Vec<_> = app.entries().to_vec();
+    let book_ids_snapshot: Vec<Option<cleader::epub::BookId>> = (0..app.entries().len())
+        .map(|i| app.book_id(i).cloned())
+        .collect();
+    term.draw(|frame| {
+        let area = frame.area();
+        render_library(
+            frame,
+            area,
+            LibraryRenderInput {
+                entries: &entries_snapshot,
+                selection: 0,
+                view_mode: ViewMode::Grid,
+                cover_cache: app.cover_cache(),
+                book_ids: &book_ids_snapshot,
+                warning: None,
+            },
+        );
+    })
+    .unwrap();
+
+    // We don't assert specific glyphs — the cover may or may not have
+    // landed in 600ms depending on system load. We're testing that the
+    // full path (scan → BookId → enqueue → render) doesn't panic.
+}
