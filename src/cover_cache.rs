@@ -61,7 +61,9 @@ pub const PLACEHOLDER: [&str; 17] = [
 /// that ever failed to decode had the placeholder pinned to disk).
 /// v4: COVER_THUMBNAIL_HEIGHT 12 → 17 (natural-aspect 2:3 cover at
 /// width 22) and CELL_HEIGHT 16 → 21; output dimensions changed.
-const COVER_CACHE_VERSION: &str = "v4";
+/// v5: ASCII_GRADIENT expanded from 5 chars to 7 (' .-+=​#@');
+/// brightness-to-glyph mapping changed so old cached glyphs are wrong.
+const COVER_CACHE_VERSION: &str = "v5";
 
 /// Resolve `<data_dir>/covers/<version>/`. Returns `None` if the OS can't
 /// tell us where the data dir is (rare; e.g. unset $HOME on a fresh CI
@@ -514,8 +516,8 @@ mod tests {
         if let Some(path) = default_cache_dir() {
             let s = path.to_string_lossy();
             assert!(
-                s.contains("covers") && s.ends_with("v4"),
-                "default_cache_dir should be .../covers/v4, got {s}"
+                s.contains("covers") && s.ends_with("v5"),
+                "default_cache_dir should be .../covers/v5, got {s}"
             );
         }
     }

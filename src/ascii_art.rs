@@ -9,17 +9,22 @@
 
 use image::imageops::FilterType;
 
-/// Brightness ramp from "no ink" to "full ink." 5-level ASCII ramp with
-/// each character visually distinct from its neighbors — so Lanczos-
-/// smoothed mid-tone gradients can't produce speckle of look-alike
-/// characters the way the older 10-char ramp did.
+/// Brightness ramp from "no ink" to "full ink." 7-level ASCII ramp.
+/// Each character is visually distinct in standard monospace fonts
+/// and ascends monotonically in ink density: empty → tiny dot →
+/// horizontal stroke → cross → double-bar → crosshatch → densest.
 ///
-/// Tried Unicode block elements (` ░▒▓█`) briefly — they made covers
-/// look like blurry low-res photos rather than ASCII art. The point of
-/// rendering covers in a terminal is that they look like character art,
-/// not that they approximate a continuous-tone image. Keep the ASCII
-/// character feel; use distinct glyphs to fight mud.
-const ASCII_GRADIENT: &[char] = &[' ', '.', '+', '#', '@'];
+/// History: v0.4.3 used a 5-char ramp (` .+#@`) to fight speckle from
+/// a 10-char gradient. With v0.4.4's taller cells (22×17), the 5-char
+/// ramp crushed mid-tones and covers lost depth. The current 7-char
+/// ramp adds intermediates ('-' and '=') that span the gap between
+/// the original five without reintroducing speckle from look-alike
+/// glyphs.
+///
+/// Tried Unicode block elements (` ░▒▓█`) in v0.4.3 — they made covers
+/// look like blurry low-res photos rather than ASCII art. Keep the
+/// ASCII character feel; use distinct glyphs to fight mud.
+const ASCII_GRADIENT: &[char] = &[' ', '.', '-', '+', '=', '#', '@'];
 
 /// Defensive upper bound on rendered ASCII-art row count. Real book
 /// covers are roughly 1:1.5 aspect — at width 60 that's 45 rows; at
@@ -218,11 +223,10 @@ mod tests {
 
     #[test]
     fn gradient_is_distinct_ascii_ramp() {
-        // Locks in the v0.4.3a choice. If a future change to the ramp
-        // breaks the contract, this test fails loudly and the change
-        // has to be deliberate. Each character is visually distinct
-        // from its neighbors so Lanczos-smoothed mid-tones don't
-        // produce look-alike speckle.
-        assert_eq!(ASCII_GRADIENT, &[' ', '.', '+', '#', '@']);
+        // Locks in the v0.4.4 cover-depth fix. Each character is
+        // visually distinct from its neighbors and ascends monotonically
+        // in ink density. If a future change breaks the contract, this
+        // test fails loudly and the change has to be deliberate.
+        assert_eq!(ASCII_GRADIENT, &[' ', '.', '-', '+', '=', '#', '@']);
     }
 }
