@@ -1,8 +1,8 @@
 //! Library view rendering — list and grid modes, cover cell layout,
 //! footer with search box / warning / default hint, "no matches"
 //! overlay. Reader-mode chapter rendering lives in `reader.rs`;
-//! these two split was done in v0.4.6 hygiene to keep both modules
-//! at a comfortable size.
+//! this split was done in v0.4.6 hygiene to keep both modules at a
+//! comfortable size.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
