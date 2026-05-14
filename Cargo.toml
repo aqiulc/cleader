@@ -1,10 +1,10 @@
 [package]
 name = "cleader"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Aqiul <aqiul.c@gmail.com>"]
-description = "A high-performance, distraction-free CLI ebook reader"
+description = "A distraction-free terminal EPUB reader with library browsing, search, and cover art"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/aqiulc/cleader"
 readme = "README.md"

@@ -1,26 +1,21 @@
 # cleader
 
-A distraction-free terminal EPUB reader written in Rust.
+A distraction-free terminal EPUB reader. Opens a single book or a whole
+directory; remembers where you left off; never gets in your way.
 
 ```
   ── Firefly: Generations ─ Ch 4/22 ─ Page 18/247 ─ q quit ──
 ```
 
-## Features (v1)
+## Install
 
-- Open any EPUB by path: `cleader path/to/book.epub`
-- Paginated reader with word-boundary wrapping at a comfortable column width.
-- Bold, italic, and heading styles preserved from the source EPUB.
-- Vim-style and arrow-key navigation, plus Page Up/Down and Space.
-- Chapter jumping with `n` / `N`.
-- Reading position is saved automatically and restored next time you open the same book.
-- Cross-platform: macOS, Linux, Windows. One binary, one code path.
+Until cleader hits the package managers, install from source:
 
-See [`BACKLOG.md`](BACKLOG.md) for what's coming next.
+```bash
+cargo install --path .   # from a local clone
+```
 
-## Installation
-
-While `cleader` is pre-release, install from source:
+Or directly:
 
 ```bash
 git clone https://github.com/aqiulc/cleader
@@ -28,56 +23,99 @@ cd cleader
 cargo install --path .
 ```
 
-This installs the `cleader` binary into `~/.cargo/bin/`. Make sure that's on your `$PATH`.
-
-Distribution via Homebrew, Chocolatey/Scoop, `cargo install cleader`, and prebuilt GitHub Release binaries is on the roadmap — see backlog item 9.
+The `cleader` binary lands in `~/.cargo/bin/`. Make sure that's on your `$PATH`.
 
 ## Usage
 
-```
-cleader <path-to-book.epub>
-```
-
-Example:
+**Read a single book:**
 
 ```bash
-cleader ~/Books/Firefly_Generations.epub
+cleader path/to/book.epub
 ```
+
+**Browse a directory of books:**
+
+```bash
+cleader path/to/library/
+```
+
+The directory form opens a library view where you can pick a book.
+Toggle between grid (with ASCII cover art) and list views with `g`.
+Search by title or author with `/`.
 
 ### Options
 
 - `-w`, `--width=N` — target body text width in columns (default 80).
+- `--help` / `--version` — standard clap.
 
-### Key bindings
+## Key bindings
+
+Press `?` from anywhere for the full overlay. Quick reference:
+
+**Library**
 
 | Action | Keys |
 |---|---|
-| Scroll one line | `↑` / `↓` or `k` / `j` |
-| Flip a page | `←` / `→` or `h` / `l` or `Space` / `b` or `PgUp` / `PgDn` |
-| Next chapter | `n` |
-| Previous chapter | `N` (Shift+n) |
-| Open table of contents | `t` |
+| Navigate | `↑` `↓` `←` `→` or `h` `j` `k` `l` |
+| Toggle grid/list | `g` |
+| Search | `/` |
+| Open selected book | `Enter` |
+
+**Reading**
+
+| Action | Keys |
+|---|---|
+| Scroll line | `↑` `↓` or `k` `j` |
+| Flip page | `←` `→` or `h` `l` or `Space` `b` or `PgUp` `PgDn` |
+| Next / previous chapter | `n` / `N` (Shift+n) |
+| Table of contents | `t` |
+
+**Anywhere**
+
+| Action | Keys |
+|---|---|
+| Toggle help overlay | `?` |
 | Quit (saves position) | `q`, `Esc`, or `Ctrl+C` |
 
-### Where your reading position is saved
+## Where things are saved
+
+Reading positions, view preferences, and cached cover art live in the
+OS-native data directory:
 
 | OS | Path |
 |---|---|
-| macOS | `~/Library/Application Support/cleader/registry.json` |
-| Linux | `~/.local/share/cleader/registry.json` |
-| Windows | `%APPDATA%\cleader\registry.json` |
+| macOS | `~/Library/Application Support/cleader/` |
+| Linux | `~/.local/share/cleader/` |
+| Windows | `%APPDATA%\cleader\` |
 
-The registry is a small JSON file you can inspect, back up, or delete (cleader will start fresh if it's gone).
+Three files plus a directory:
+
+- `registry.json` — reading positions (one entry per book, content-hashed)
+- `prefs.json` — view-mode preference
+- `covers/v5/` — cached cover ASCII art (one file per book)
+
+All are safe to delete; cleader will start fresh. Books are identified by
+SHA-256 of their content, so moving an EPUB doesn't reset your progress.
+
+## Highlights
+
+- **Smart resize** — wrap width changes preserve your position in the source
+  text, not just the line offset.
+- **Atomic saves** — reading position writes go through a tempfile+rename,
+  so a crash mid-write never corrupts the registry.
+- **Background cover rendering** — the library worker generates covers
+  viewport-only and caches them to disk; second-open is instant.
+- **Cross-platform** — one binary, one code path. macOS, Linux, Windows.
 
 ## License
 
-Licensed under either of:
+Dual-licensed:
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+- [Apache 2.0](LICENSE-APACHE)
+- [MIT](LICENSE-MIT)
 
-at your option.
+at your option. Contributions are accepted under the same dual license.
 
-### Contribution
+## Author
 
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
+Created by Aqiul — `aqiul.c@gmail.com`.

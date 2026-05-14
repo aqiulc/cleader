@@ -1,4 +1,10 @@
 target/
 books/
 registry.json
+prefs.json
+covers/
 .DS_Store
+.idea/
+.vscode/
+*.swp
+*.tmp
