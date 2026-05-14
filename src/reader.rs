@@ -366,25 +366,6 @@ pub struct TocOverlay {
 pub const DEFAULT_MAX_BODY_WIDTH: u16 = 80;
 const BODY_LEFT_PAD: u16 = 3;
 
-/// Single source of truth for the help overlay's binding list. Kept
-/// next to the renderer (rather than in input.rs) so the on-screen
-/// copy can describe groups of keys (eg. "↑ ↓ / k j") that map to the
-/// same Action — input.rs has one entry per code/modifier combination
-/// and would be noisy as user-facing copy.
-const HELP_LINES: &[(&str, &str)] = &[
-    ("Scroll one line", "↑ ↓ / k j"),
-    ("Flip a page", "← → / h l / Space b / PgUp PgDn"),
-    ("Next chapter", "n"),
-    ("Previous chapter", "N (Shift+n)"),
-    ("Table of contents", "t"),
-    ("Toggle this help", "?"),
-    ("Quit (saves position)", "q / Esc / Ctrl+C"),
-];
-
-/// Width of the label column inside the help modal (chars). The longest
-/// label is "Quit (saves position)" at 21 chars; 22 leaves a one-char
-/// gap before the keys column.
-const HELP_LABEL_WIDTH: usize = 22;
 
 pub fn render(frame: &mut Frame, area: Rect, input: RenderInput<'_>) {
     let chunks = Layout::default()
@@ -432,73 +413,10 @@ pub fn render(frame: &mut Frame, area: Rect, input: RenderInput<'_>) {
     frame.render_widget(status, status_area);
 
     if input.show_help {
-        render_help_overlay(frame, area);
+        crate::help::render_help_overlay(frame, area);
     } else if let Some(toc) = &input.toc {
         render_toc_overlay(frame, area, toc);
     }
-}
-
-/// Render a centered modal over `area` listing the keybindings.
-///
-/// `Clear` is rendered first so the body text doesn't bleed through
-/// the modal interior. The modal sizes itself to fit its content but
-/// is clamped to `area` so it never tries to draw outside the frame
-/// (which would panic in ratatui).
-fn render_help_overlay(frame: &mut Frame, area: Rect) {
-    // Compose lines: top padding + bindings + blank + footer.
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(Line::default());
-    for (label, keys) in HELP_LINES {
-        let padded_label = format!("  {label:<HELP_LABEL_WIDTH$}");
-        let line = Line::from(vec![
-            TuiSpan::raw(padded_label),
-            TuiSpan::styled(*keys, Style::default().add_modifier(Modifier::BOLD)),
-        ]);
-        lines.push(line);
-    }
-    lines.push(Line::default());
-    lines.push(Line::from(vec![TuiSpan::styled(
-        "  Press ? Esc q Ctrl+C to close",
-        Style::default().add_modifier(Modifier::DIM),
-    )]));
-
-    // Modal width: longest line in columns + 2 for borders + 2 for
-    // right-side breathing room. Clamp to the available area so we
-    // never overflow the frame (which would panic).
-    let max_content_width = lines
-        .iter()
-        .map(|l| {
-            l.spans
-                .iter()
-                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                .sum::<usize>()
-        })
-        .max()
-        .unwrap_or(0);
-    let modal_width = ((max_content_width as u16).saturating_add(4))
-        .max(20)
-        .min(area.width);
-    let modal_height = ((lines.len() as u16).saturating_add(2))
-        .max(5)
-        .min(area.height);
-
-    // Center within the area.
-    let x = area.x + area.width.saturating_sub(modal_width) / 2;
-    let y = area.y + area.height.saturating_sub(modal_height) / 2;
-    let modal_area = Rect {
-        x,
-        y,
-        width: modal_width,
-        height: modal_height,
-    };
-
-    let block = TuiBlock::default()
-        .title(" Key bindings ")
-        .borders(Borders::ALL);
-
-    // Clear underneath so body text doesn't bleed through the modal.
-    frame.render_widget(Clear, modal_area);
-    frame.render_widget(Paragraph::new(lines).block(block), modal_area);
 }
 
 /// Render a centered modal over `area` listing every chapter and

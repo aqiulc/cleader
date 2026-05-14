@@ -3,6 +3,7 @@ pub mod ascii_art;
 pub mod cover_cache;
 pub mod epub;
 pub mod error;
+pub mod help;
 pub mod input;
 pub mod library;
 pub mod library_app;
