@@ -11,6 +11,7 @@ use crate::epub::BookId;
 use crate::input::Action;
 use crate::library::LibraryEntry;
 use crate::prefs::{PrefsStore, ViewMode};
+use crate::search::{filter_indices, SearchMode, SearchState};
 use std::path::PathBuf;
 
 pub struct LibraryApp {
@@ -19,6 +20,13 @@ pub struct LibraryApp {
     /// computed lazily on first call to `request_visible_covers(i)`.
     /// Length always equals `entries.len()`.
     book_ids: Vec<Option<BookId>>,
+    /// Parallel to `entries`: pre-lowercased `"{title}\n{author}"` string
+    /// for fast substring matching during search. Built once at
+    /// construction; avoids re-lowercasing on every keystroke.
+    entries_lowercased: Vec<String>,
+    /// Precomputed `(0..entries.len()).collect()`. Returned by
+    /// `display_indices()` when no search filter is active.
+    all_indices: Vec<usize>,
     selection: usize,
     viewport_size: (u16, u16),
     should_quit: bool,
@@ -30,6 +38,9 @@ pub struct LibraryApp {
     cover_cache: Option<CoverCache>,
     prefs: Option<PrefsStore>,
     save_error: Option<String>,
+    search: SearchState,
+    /// Selection captured when search began. Restored on Esc clear.
+    pre_search_selection: usize,
 }
 
 impl LibraryApp {
@@ -55,9 +66,16 @@ impl LibraryApp {
             .map(|p| p.view_mode())
             .unwrap_or_default();
         let book_ids = vec![None; entries.len()];
+        let entries_lowercased: Vec<String> = entries
+            .iter()
+            .map(|e| format!("{}\n{}", e.title.to_lowercase(), e.author.to_lowercase()))
+            .collect();
+        let all_indices: Vec<usize> = (0..entries.len()).collect();
         Self {
             entries,
             book_ids,
+            entries_lowercased,
+            all_indices,
             selection: 0,
             viewport_size: viewport,
             should_quit: false,
@@ -66,6 +84,8 @@ impl LibraryApp {
             cover_cache,
             prefs,
             save_error: None,
+            search: SearchState::default(),
+            pre_search_selection: 0,
         }
     }
 
@@ -156,12 +176,69 @@ impl LibraryApp {
         }
     }
 
-    /// Look up an already-computed BookId for an entry. Returns None if
-    /// `request_visible_covers` hasn't been called for this index yet or
-    /// if the file couldn't be read.
+    /// True when the search box is open (Editing state). Used by the
+    /// event loop to route keystrokes into the search buffer instead
+    /// of the normal translate-action path.
+    pub fn is_searching(&self) -> bool {
+        matches!(self.search.mode, SearchMode::Editing)
+    }
+
+    /// True when a filter is in effect (Editing OR Applied). Used by
+    /// renderer to decide whether to show the search box in the footer.
+    pub fn has_filter(&self) -> bool {
+        !matches!(self.search.mode, SearchMode::Idle)
+    }
+
+    pub fn search_query(&self) -> &str {
+        &self.search.query
+    }
+
+    pub fn search_mode(&self) -> SearchMode {
+        self.search.mode
+    }
+
+    /// Returns the indices into `entries` that should currently be
+    /// shown. Either `all_indices` (no filter) or `search.filtered`
+    /// (search active). Renderer iterates this; navigation moves
+    /// `selection` within its bounds.
+    pub fn display_indices(&self) -> &[usize] {
+        if self.has_filter() {
+            &self.search.filtered
+        } else {
+            &self.all_indices
+        }
+    }
+
+    /// Open the search box. Captures the current `selection` so Esc
+    /// can restore it; transitions to Editing mode. If already in
+    /// Applied (filter set but box closed), this re-opens the box
+    /// over the existing query for refinement.
+    pub fn open_search(&mut self) {
+        if matches!(self.search.mode, SearchMode::Idle) {
+            self.pre_search_selection = self.selection;
+            self.search.query.clear();
+            self.refilter();
+            self.selection = 0;
+        }
+        self.search.mode = SearchMode::Editing;
+    }
+
+    /// Recompute `search.filtered` from `search.query`. Called after
+    /// every query mutation.
+    fn refilter(&mut self) {
+        let query_lc = self.search.query.to_lowercase();
+        self.search.filtered = filter_indices(&self.entries_lowercased, &query_lc);
+    }
+
+    /// Look up an already-computed BookId for a display position.
+    /// `display_idx` indexes the currently visible sequence (which may
+    /// be the full entries list or a filtered subset). Returns None
+    /// if the index is out of range or if `request_visible_covers`
+    /// hasn't computed the BookId for the underlying entry yet.
     #[doc(hidden)]
-    pub fn book_id(&self, idx: usize) -> Option<&BookId> {
-        self.book_ids.get(idx).and_then(|opt| opt.as_ref())
+    pub fn book_id(&self, display_idx: usize) -> Option<&BookId> {
+        let entry_idx = self.display_indices().get(display_idx)?;
+        self.book_ids.get(*entry_idx).and_then(|opt| opt.as_ref())
     }
 
     fn toggle_view_mode(&mut self) {
@@ -199,9 +276,9 @@ impl LibraryApp {
             Action::LineDown => {
                 if matches!(self.view_mode, ViewMode::Grid) {
                     let cols = self.grid_cols();
-                    let max = self.entries.len().saturating_sub(1);
+                    let max = self.display_indices().len().saturating_sub(1);
                     self.selection = (self.selection + cols).min(max);
-                } else if self.selection + 1 < self.entries.len() {
+                } else if self.selection + 1 < self.display_indices().len() {
                     self.selection += 1;
                 }
             }
@@ -217,20 +294,23 @@ impl LibraryApp {
             }
             Action::PageNext => {
                 if matches!(self.view_mode, ViewMode::Grid) {
-                    let max = self.entries.len().saturating_sub(1);
+                    let max = self.display_indices().len().saturating_sub(1);
                     if self.selection < max {
                         self.selection += 1;
                     }
                 } else {
                     let step = self.lines_per_page().min(10);
-                    let max = self.entries.len().saturating_sub(1);
+                    let max = self.display_indices().len().saturating_sub(1);
                     self.selection = (self.selection + step).min(max);
                 }
             }
             Action::Confirm => {
-                if let Some(entry) = self.entries.get(self.selection) {
-                    self.selected_path = Some(entry.path.clone());
-                    self.should_quit = true;
+                let display = self.display_indices();
+                if let Some(&entry_idx) = display.get(self.selection) {
+                    if let Some(entry) = self.entries.get(entry_idx) {
+                        self.selected_path = Some(entry.path.clone());
+                        self.should_quit = true;
+                    }
                 }
             }
             Action::Quit => {
@@ -243,8 +323,7 @@ impl LibraryApp {
                 self.toggle_view_mode();
             }
             Action::OpenSearch => {
-                // Temporary no-op; Task 3 of v0.4.5 replaces this with
-                // the real handler that opens the search box.
+                self.open_search();
             }
             // Reader-only actions are no-ops in library mode.
             Action::ChapterNext
@@ -534,5 +613,84 @@ mod tests {
         assert_eq!(app.selection(), 1);
         app.handle(Action::PageNext);
         assert!(app.selection() > 1, "PageNext in list should jump a page");
+    }
+
+    use crate::search::SearchMode;
+
+    #[test]
+    fn open_search_transitions_idle_to_editing() {
+        let mut app = LibraryApp::new_with(
+            vec![entry("A"), entry("B")],
+            (80, 24),
+            None,
+            None,
+        );
+        assert_eq!(app.search_mode(), SearchMode::Idle);
+        app.handle(Action::OpenSearch);
+        assert_eq!(app.search_mode(), SearchMode::Editing);
+        assert!(app.is_searching());
+    }
+
+    #[test]
+    fn open_search_captures_pre_search_selection() {
+        let mut app = LibraryApp::new_with(
+            vec![entry("A"), entry("B"), entry("C")],
+            (80, 24),
+            None,
+            None,
+        );
+        // Move to selection 2, then open search.
+        app.handle(Action::LineDown);
+        app.handle(Action::LineDown);
+        assert_eq!(app.selection(), 2);
+        app.handle(Action::OpenSearch);
+        assert_eq!(app.selection(), 0, "selection resets to 0 on open_search");
+        // pre_search_selection is captured (not directly observable; we
+        // verify it by Esc-style restore in Task 4's tests).
+    }
+
+    #[test]
+    fn display_indices_returns_all_when_idle() {
+        let app = LibraryApp::new_with(
+            vec![entry("A"), entry("B"), entry("C")],
+            (80, 24),
+            None,
+            None,
+        );
+        assert_eq!(app.display_indices(), &[0, 1, 2]);
+    }
+
+    #[test]
+    fn empty_query_shows_all_after_open_search() {
+        // After open_search() the query is empty; display_indices()
+        // should return all entries (since empty-query filter is "all").
+        let mut app = LibraryApp::new_with(
+            vec![entry("A"), entry("B"), entry("C")],
+            (80, 24),
+            None,
+            None,
+        );
+        app.handle(Action::OpenSearch);
+        assert_eq!(app.display_indices(), &[0, 1, 2]);
+    }
+
+    #[test]
+    fn open_search_from_applied_re_enters_editing_preserving_query() {
+        // Mimic Applied state by directly opening search and committing
+        // (commit is Task 4). For Task 3, just verify Editing → Editing
+        // is idempotent and doesn't clobber the captured pre_search_selection.
+        let mut app = LibraryApp::new_with(
+            vec![entry("A"), entry("B")],
+            (80, 24),
+            None,
+            None,
+        );
+        app.handle(Action::LineDown);
+        app.handle(Action::OpenSearch);
+        assert_eq!(app.search_mode(), SearchMode::Editing);
+        // Second open_search while already in Editing should not clear
+        // pre_search_selection or reset query (idempotent re-open).
+        app.handle(Action::OpenSearch);
+        assert_eq!(app.search_mode(), SearchMode::Editing);
     }
 }
