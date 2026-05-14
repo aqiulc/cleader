@@ -342,6 +342,7 @@ impl LibraryApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::SearchMode;
     use std::path::Path;
 
     fn entry(title: &str) -> LibraryEntry {
@@ -615,8 +616,6 @@ mod tests {
         assert!(app.selection() > 1, "PageNext in list should jump a page");
     }
 
-    use crate::search::SearchMode;
-
     #[test]
     fn open_search_transitions_idle_to_editing() {
         let mut app = LibraryApp::new_with(
@@ -662,8 +661,12 @@ mod tests {
 
     #[test]
     fn empty_query_shows_all_after_open_search() {
-        // After open_search() the query is empty; display_indices()
-        // should return all entries (since empty-query filter is "all").
+        // After open_search() we're in Editing mode (has_filter == true,
+        // is_searching == true) with an empty query. display_indices()
+        // returns &search.filtered, which equals all indices because
+        // filter_indices("") returns 0..N. This pins the Editing-path
+        // behavior — distinct from display_indices_returns_all_when_idle
+        // which exercises the Idle-path that reads from all_indices.
         let mut app = LibraryApp::new_with(
             vec![entry("A"), entry("B"), entry("C")],
             (80, 24),
@@ -671,14 +674,17 @@ mod tests {
             None,
         );
         app.handle(Action::OpenSearch);
+        assert!(app.is_searching(), "open_search should put us in Editing");
+        assert!(app.has_filter(), "Editing mode counts as has_filter");
         assert_eq!(app.display_indices(), &[0, 1, 2]);
     }
 
     #[test]
-    fn open_search_from_applied_re_enters_editing_preserving_query() {
-        // Mimic Applied state by directly opening search and committing
-        // (commit is Task 4). For Task 3, just verify Editing → Editing
-        // is idempotent and doesn't clobber the captured pre_search_selection.
+    fn open_search_in_editing_is_idempotent() {
+        // Re-pressing OpenSearch while already in Editing should not
+        // reset state — it leaves mode, query, and pre_search_selection
+        // intact. The full Applied → Editing round-trip is verified in
+        // Task 4's tests (which exercise Enter and Esc).
         let mut app = LibraryApp::new_with(
             vec![entry("A"), entry("B")],
             (80, 24),
