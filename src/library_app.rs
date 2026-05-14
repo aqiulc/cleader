@@ -15,6 +15,46 @@ use crate::search::{filter_indices, SearchMode, SearchState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 
+/// Time to hold at the start of a long title before scrolling begins,
+/// so the user can read the beginning. 1000 ms.
+const MARQUEE_HOLD_START_MS: u128 = 1000;
+
+/// Time to hold at the end of a long title after the tail is visible,
+/// so the user can read the end. 1000 ms.
+const MARQUEE_HOLD_END_MS: u128 = 1000;
+
+/// Time per character of scroll. 250 ms = 4 chars/sec — slow enough
+/// to read mid-scroll.
+const MARQUEE_PER_CHAR_MS: u128 = 250;
+
+/// Pure scroll-offset calculator. Given the number of milliseconds
+/// since the marquee started and the total characters the title
+/// overflows the cell by, returns the current left-shift offset
+/// (0..=overflow).
+///
+/// Cycle phases (in order):
+/// 1. Hold at start (offset = 0) for MARQUEE_HOLD_START_MS
+/// 2. Scroll left, one char per MARQUEE_PER_CHAR_MS, until offset == overflow
+/// 3. Hold at end (offset = overflow) for MARQUEE_HOLD_END_MS
+/// 4. Snap back to 0, repeat
+///
+/// If `overflow == 0` the function always returns 0 (no-op).
+pub fn marquee_offset(elapsed_ms: u128, overflow: usize) -> usize {
+    if overflow == 0 {
+        return 0;
+    }
+    let scroll_ms = (overflow as u128) * MARQUEE_PER_CHAR_MS;
+    let cycle_ms = MARQUEE_HOLD_START_MS + scroll_ms + MARQUEE_HOLD_END_MS;
+    let t = elapsed_ms % cycle_ms;
+    if t < MARQUEE_HOLD_START_MS {
+        0
+    } else if t < MARQUEE_HOLD_START_MS + scroll_ms {
+        ((t - MARQUEE_HOLD_START_MS) / MARQUEE_PER_CHAR_MS) as usize
+    } else {
+        overflow
+    }
+}
+
 pub struct LibraryApp {
     entries: Vec<LibraryEntry>,
     /// Parallel to `entries`: `book_ids[i]` is the BookId for `entries[i]`,
@@ -996,5 +1036,44 @@ mod tests {
         assert_eq!(app.display_indices(), &[0, 2]);
         assert!(!app.should_quit());
         assert!(app.selected_path().is_none());
+    }
+
+    #[test]
+    fn marquee_offset_returns_zero_when_no_overflow() {
+        assert_eq!(super::marquee_offset(0, 0), 0);
+        assert_eq!(super::marquee_offset(99999, 0), 0);
+    }
+
+    #[test]
+    fn marquee_offset_holds_at_start_for_one_second() {
+        // At t < 1000ms with overflow=5, offset is 0 (hold-start phase).
+        assert_eq!(super::marquee_offset(0, 5), 0);
+        assert_eq!(super::marquee_offset(500, 5), 0);
+        assert_eq!(super::marquee_offset(999, 5), 0);
+    }
+
+    #[test]
+    fn marquee_offset_scrolls_one_char_per_step() {
+        // From t=1000 to t=1000+5*250=2250 the offset ramps 0..5.
+        assert_eq!(super::marquee_offset(1000, 5), 0);
+        assert_eq!(super::marquee_offset(1250, 5), 1);
+        assert_eq!(super::marquee_offset(1500, 5), 2);
+        assert_eq!(super::marquee_offset(2249, 5), 4);
+    }
+
+    #[test]
+    fn marquee_offset_holds_at_end() {
+        // From t=2250 (after scroll completes) for 1000ms, offset = overflow.
+        assert_eq!(super::marquee_offset(2250, 5), 5);
+        assert_eq!(super::marquee_offset(2500, 5), 5);
+        assert_eq!(super::marquee_offset(3249, 5), 5);
+    }
+
+    #[test]
+    fn marquee_offset_cycles() {
+        // At t = cycle_ms (3250) it wraps to 0 again.
+        let cycle_ms = 1000 + 5 * 250 + 1000;
+        assert_eq!(super::marquee_offset(cycle_ms, 5), 0);
+        assert_eq!(super::marquee_offset(cycle_ms + 500, 5), 0);
     }
 }
