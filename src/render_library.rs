@@ -34,6 +34,13 @@ pub struct LibraryRenderInput<'a> {
     /// Current search mode. Drives footer rendering and the "no matches"
     /// content overlay.
     pub search_mode: crate::search::SearchMode,
+    /// Marquee scroll offset for the SELECTED cell's title only.
+    /// 0 in Idle/non-marquee state. Renderer slices the selected
+    /// cell's title from this index before truncating to the cell
+    /// width. Caller (event loop) computes this each frame from
+    /// LibraryApp::marquee_elapsed_ms and the selected cell's title
+    /// overflow.
+    pub marquee_offset: usize,
 }
 
 pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'_>) {
@@ -269,7 +276,14 @@ fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
             } else {
                 Style::default().add_modifier(Modifier::BOLD)
             };
-            let title_truncated = truncate_to_width(&entry.title, COVER_THUMBNAIL_WIDTH as usize);
+            let title_for_render: String = if is_selected && input.marquee_offset > 0 {
+                // Apply marquee scroll: skip the first `marquee_offset`
+                // characters before truncating to cell width.
+                entry.title.chars().skip(input.marquee_offset).collect()
+            } else {
+                entry.title.clone()
+            };
+            let title_truncated = truncate_to_width(&title_for_render, COVER_THUMBNAIL_WIDTH as usize);
             let author_truncated = truncate_to_width(&entry.author, COVER_THUMBNAIL_WIDTH as usize);
             let title_lines = vec![
                 Line::from(TuiSpan::styled(title_truncated, title_style)),
@@ -441,6 +455,7 @@ mod tests {
                 display_indices: &[0],
                 search_query: None,
                 search_mode: crate::search::SearchMode::Idle,
+                marquee_offset: 0,
             });
         }).unwrap();
     }
@@ -468,6 +483,7 @@ mod tests {
                     display_indices: &display_indices,
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
+                    marquee_offset: 0,
                 },
             );
         })
@@ -496,6 +512,7 @@ mod tests {
                     display_indices: &display_indices,
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
+                    marquee_offset: 0,
                 },
             );
         })
@@ -537,6 +554,7 @@ mod tests {
                     display_indices: &display_indices,
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
+                    marquee_offset: 0,
                 },
             );
         })
@@ -579,6 +597,7 @@ mod tests {
                         display_indices: &display_indices,
                         search_query: None,
                         search_mode: crate::search::SearchMode::Idle,
+                        marquee_offset: 0,
                     },
                 );
             })
@@ -623,6 +642,7 @@ mod tests {
                     display_indices: &display_indices,
                     search_query: Some("book"),
                     search_mode: crate::search::SearchMode::Editing,
+                    marquee_offset: 0,
                 },
             );
         })
@@ -657,6 +677,7 @@ mod tests {
                     display_indices: &display_indices,
                     search_query: Some("book"),
                     search_mode: crate::search::SearchMode::Applied,
+                    marquee_offset: 0,
                 },
             );
         })
@@ -691,6 +712,7 @@ mod tests {
                     display_indices: &display_indices,
                     search_query: Some("xyz"),
                     search_mode: crate::search::SearchMode::Editing,
+                    marquee_offset: 0,
                 },
             );
         })
@@ -723,5 +745,72 @@ mod tests {
         // selection=99 → page 16 → 96..100 (clamped to total)
         let r = visible_grid_range(80, 42, 100, 99).unwrap();
         assert_eq!(r, 96..100);
+    }
+
+    #[test]
+    fn marquee_offset_shifts_selected_title() {
+        let backend = TestBackend::new(80, 40);
+        let mut term = Terminal::new(backend).unwrap();
+        // Single entry with a very long title.
+        let long_title = "AAAAAA_BBBBBB_CCCCCC_DDDDDD_EEEEEE";  // 34 chars, overflow=12
+        let entries = vec![LibraryEntry {
+            path: PathBuf::from("/long.epub"),
+            title: long_title.to_string(),
+            author: "Anon".to_string(),
+        }];
+        let book_ids = vec![None];
+        let display_indices = vec![0];
+
+        // First: render with marquee_offset = 0 (start of cycle).
+        term.draw(|frame| {
+            let area = frame.area();
+            render_library(
+                frame,
+                area,
+                LibraryRenderInput {
+                    entries: &entries,
+                    selection: 0,
+                    view_mode: ViewMode::Grid,
+                    cover_cache: None,
+                    book_ids: &book_ids,
+                    warning: None,
+                    display_indices: &display_indices,
+                    search_query: None,
+                    search_mode: crate::search::SearchMode::Idle,
+                    marquee_offset: 0,
+                },
+            );
+        })
+        .unwrap();
+        let buf_zero: String = term.backend().buffer().content.iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(buf_zero.contains("AAAAAA"), "offset=0 should show title start");
+
+        // Re-render with marquee_offset = 7 (mid-scroll: 'B's onward).
+        term.draw(|frame| {
+            let area = frame.area();
+            render_library(
+                frame,
+                area,
+                LibraryRenderInput {
+                    entries: &entries,
+                    selection: 0,
+                    view_mode: ViewMode::Grid,
+                    cover_cache: None,
+                    book_ids: &book_ids,
+                    warning: None,
+                    display_indices: &display_indices,
+                    search_query: None,
+                    search_mode: crate::search::SearchMode::Idle,
+                    marquee_offset: 7,
+                },
+            );
+        })
+        .unwrap();
+        let buf_seven: String = term.backend().buffer().content.iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(buf_seven.contains("BBBBBB"), "offset=7 should reveal characters after the first 7");
     }
 }

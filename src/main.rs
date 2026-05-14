@@ -262,6 +262,23 @@ fn library_event_loop(
                 Some(app.search_query().to_string())
             };
 
+            // Compute marquee offset for the currently-selected cell.
+            // The selected cell is at display_indices[selection] →
+            // entry_idx → entries[entry_idx].title. Overflow is title's
+            // char count minus the cell content width (22).
+            let marquee_offset_val: usize = if matches!(view_mode, cleader::prefs::ViewMode::Grid) {
+                let display = app.display_indices();
+                let title_overflow = display.get(selection).and_then(|&entry_idx| {
+                    app.entries().get(entry_idx).map(|e| {
+                        let cell_w = cleader::cover_cache::COVER_THUMBNAIL_WIDTH as usize;
+                        e.title.chars().count().saturating_sub(cell_w)
+                    })
+                }).unwrap_or(0);
+                cleader::library_app::marquee_offset(app.marquee_elapsed_ms(), title_overflow)
+            } else {
+                0
+            };
+
             terminal.draw(|frame| {
                 let area = frame.area();
                 cleader::render_library::render_library(
@@ -277,6 +294,7 @@ fn library_event_loop(
                         display_indices: &display_indices_snapshot,
                         search_query: search_query_owned.as_deref(),
                         search_mode,
+                        marquee_offset: marquee_offset_val,
                     },
                 );
             })?;
@@ -307,6 +325,23 @@ fn library_event_loop(
                 app.handle(action);
                 needs_redraw = true;
             }
+        }
+
+        // If the selected cell has a long title, force redraw next
+        // iteration so the marquee can advance.
+        let selected_overflow = if matches!(app.view_mode(), cleader::prefs::ViewMode::Grid) {
+            let display = app.display_indices();
+            display.get(app.selection()).and_then(|&entry_idx| {
+                app.entries().get(entry_idx).map(|e| {
+                    let cell_w = cleader::cover_cache::COVER_THUMBNAIL_WIDTH as usize;
+                    e.title.chars().count().saturating_sub(cell_w)
+                })
+            }).unwrap_or(0)
+        } else {
+            0
+        };
+        if selected_overflow > 0 {
+            needs_redraw = true;
         }
     }
     Ok(())
