@@ -813,4 +813,54 @@ mod tests {
             .collect();
         assert!(buf_seven.contains("BBBBBB"), "offset=7 should reveal characters after the first 7");
     }
+
+    #[test]
+    fn marquee_offset_does_not_shift_non_selected_titles() {
+        let backend = TestBackend::new(80, 40);
+        let mut term = Terminal::new(backend).unwrap();
+        // Two entries, selection is on the first. The second's title is
+        // recognisably distinct so we can pin where in the buffer it appears.
+        let entries = vec![
+            LibraryEntry {
+                path: PathBuf::from("/first.epub"),
+                title: "XXXXXXX_YYYYYYY_ZZZZZZZ".to_string(),  // 23 chars, overflow=1
+                author: "Anon".to_string(),
+            },
+            LibraryEntry {
+                path: PathBuf::from("/second.epub"),
+                title: "MMMMMM_NNNNNNN_OOOOOOO".to_string(),  // also 22 chars, distinct prefix
+                author: "Anon".to_string(),
+            },
+        ];
+        let book_ids = vec![None, None];
+        let display_indices = vec![0, 1];
+        term.draw(|frame| {
+            let area = frame.area();
+            render_library(
+                frame,
+                area,
+                LibraryRenderInput {
+                    entries: &entries,
+                    selection: 0,
+                    view_mode: ViewMode::Grid,
+                    cover_cache: None,
+                    book_ids: &book_ids,
+                    warning: None,
+                    display_indices: &display_indices,
+                    search_query: None,
+                    search_mode: crate::search::SearchMode::Idle,
+                    marquee_offset: 7,
+                },
+            );
+        })
+        .unwrap();
+        let buf: String = term.backend().buffer().content.iter()
+            .map(|c| c.symbol())
+            .collect();
+        // The non-selected entry should still show its title from the start.
+        assert!(
+            buf.contains("MMMMMM"),
+            "non-selected cell title should NOT be shifted by marquee_offset; got buffer:\n{buf}"
+        );
+    }
 }

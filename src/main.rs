@@ -216,6 +216,22 @@ fn library_event_loop(
 ) -> anyhow::Result<()> {
     let mut needs_redraw = true; // first frame always renders
     while !app.should_quit() {
+        // Compute the selected cell's title overflow once per iteration.
+        // Used both for the marquee scroll offset and for the redraw gate
+        // (when a long title is selected, force ~20Hz redraws so the
+        // marquee animates).
+        let selected_overflow: usize = if matches!(app.view_mode(), cleader::prefs::ViewMode::Grid) {
+            let display = app.display_indices();
+            display.get(app.selection()).and_then(|&entry_idx| {
+                app.entries().get(entry_idx).map(|e| {
+                    let cell_w = cleader::cover_cache::COVER_THUMBNAIL_WIDTH as usize;
+                    e.title.chars().count().saturating_sub(cell_w)
+                })
+            }).unwrap_or(0)
+        } else {
+            0
+        };
+
         // Drain any covers the worker finished since the last frame.
         let had_new_covers = app
             .cover_cache_mut()
@@ -262,22 +278,11 @@ fn library_event_loop(
                 Some(app.search_query().to_string())
             };
 
-            // Compute marquee offset for the currently-selected cell.
-            // The selected cell is at display_indices[selection] →
-            // entry_idx → entries[entry_idx].title. Overflow is title's
-            // char count minus the cell content width (22).
-            let marquee_offset_val: usize = if matches!(view_mode, cleader::prefs::ViewMode::Grid) {
-                let display = app.display_indices();
-                let title_overflow = display.get(selection).and_then(|&entry_idx| {
-                    app.entries().get(entry_idx).map(|e| {
-                        let cell_w = cleader::cover_cache::COVER_THUMBNAIL_WIDTH as usize;
-                        e.title.chars().count().saturating_sub(cell_w)
-                    })
-                }).unwrap_or(0);
-                cleader::library_app::marquee_offset(app.marquee_elapsed_ms(), title_overflow)
-            } else {
-                0
-            };
+            // Compute marquee offset for the currently-selected cell
+            // from the shared overflow value computed at the top of the
+            // loop body.
+            let marquee_offset_val: usize =
+                cleader::library_app::marquee_offset(app.marquee_elapsed_ms(), selected_overflow);
 
             terminal.draw(|frame| {
                 let area = frame.area();
@@ -329,17 +334,6 @@ fn library_event_loop(
 
         // If the selected cell has a long title, force redraw next
         // iteration so the marquee can advance.
-        let selected_overflow = if matches!(app.view_mode(), cleader::prefs::ViewMode::Grid) {
-            let display = app.display_indices();
-            display.get(app.selection()).and_then(|&entry_idx| {
-                app.entries().get(entry_idx).map(|e| {
-                    let cell_w = cleader::cover_cache::COVER_THUMBNAIL_WIDTH as usize;
-                    e.title.chars().count().saturating_sub(cell_w)
-                })
-            }).unwrap_or(0)
-        } else {
-            0
-        };
         if selected_overflow > 0 {
             needs_redraw = true;
         }
