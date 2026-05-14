@@ -30,8 +30,12 @@ pub struct SearchState {
     pub filtered: Vec<usize>,
 }
 
-/// Filter `haystacks` against `query`. `query` is expected to be
-/// already-lowercased by the caller (saves repeated allocations).
+/// Filter `haystacks` against `query`. Both `haystacks` and `query`
+/// must already be lowercased by the caller — the function performs
+/// no case-folding itself. Pre-lowercasing avoids re-allocating per
+/// keystroke at the cost of one extra allocation per entry at
+/// construction.
+///
 /// Returns indices in source order. Empty query returns ALL indices
 /// (so the renderer never has to special-case "filter present but
 /// empty query — show what?").
@@ -68,8 +72,9 @@ mod tests {
     }
 
     #[test]
-    fn substring_match_lowercase() {
+    fn full_word_match() {
         let c = corpus();
+        // "firefly" appears as a full word in entries 0 and 1.
         assert_eq!(filter_indices(&c, "firefly"), vec![0, 1]);
     }
 
