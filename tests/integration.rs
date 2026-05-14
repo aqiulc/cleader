@@ -304,3 +304,81 @@ fn library_grid_renders_without_panic_when_directory_has_epubs() {
     // landed in 600ms depending on system load. We're testing that the
     // full path (scan → BookId → enqueue → render) doesn't panic.
 }
+
+#[test]
+fn library_search_filters_entries_end_to_end() {
+    use cleader::cover_cache::CoverCache;
+    use cleader::input::Action;
+    use cleader::library::scan_directory;
+    use cleader::library_app::LibraryApp;
+    use cleader::prefs::PrefsStore;
+    use cleader::search::SearchMode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn key(c: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code: c,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    let Some(book_path) = require_book(None) else { return; };
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("book.epub");
+    std::fs::copy(&book_path, &dest).unwrap();
+
+    let entries = scan_directory(dir.path()).expect("scan");
+    assert!(!entries.is_empty(), "scan should find at least one EPUB");
+    let original_count = entries.len();
+    let original_title_first_char = entries[0]
+        .title
+        .chars()
+        .next()
+        .unwrap_or('a')
+        .to_ascii_lowercase();
+
+    let prefs_dir = tempfile::tempdir().unwrap();
+    let prefs = PrefsStore::open_at(prefs_dir.path().join("prefs.json"));
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cover_cache = CoverCache::open_at(cache_dir.path().to_path_buf());
+
+    let mut app = LibraryApp::new_with(entries, (80, 40), Some(prefs), Some(cover_cache));
+
+    // Open search.
+    app.handle(Action::OpenSearch);
+    assert_eq!(app.search_mode(), SearchMode::Editing);
+    assert!(app.is_searching());
+    assert_eq!(app.display_indices().len(), original_count, "empty query → all entries");
+
+    // Type a char that's in the first entry's title to ensure ≥1 match.
+    app.handle_search_input(key(KeyCode::Char(original_title_first_char)));
+    assert!(
+        !app.display_indices().is_empty(),
+        "first-char filter should keep at least the first entry"
+    );
+
+    // Type something that can't possibly match.
+    app.handle_search_input(key(KeyCode::Char('§')));
+    app.handle_search_input(key(KeyCode::Char('§')));
+    assert!(app.display_indices().is_empty(), "no entries match '§§'");
+
+    // Backspace twice to widen the filter back to '<first_char>'.
+    app.handle_search_input(key(KeyCode::Backspace));
+    app.handle_search_input(key(KeyCode::Backspace));
+    assert!(!app.display_indices().is_empty(), "backspace restored to 1-char filter");
+
+    // Enter to commit → Applied.
+    app.handle_search_input(key(KeyCode::Enter));
+    assert_eq!(app.search_mode(), SearchMode::Applied);
+    assert!(!app.is_searching());
+    assert!(app.has_filter());
+
+    // Esc from Applied → clear filter.
+    app.handle(Action::Quit);
+    assert_eq!(app.search_mode(), SearchMode::Idle);
+    assert!(!app.has_filter());
+    assert!(!app.should_quit(), "Esc from Applied must not quit the library");
+    assert_eq!(app.display_indices().len(), original_count);
+}
