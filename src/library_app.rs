@@ -12,6 +12,7 @@ use crate::input::Action;
 use crate::library::LibraryEntry;
 use crate::prefs::{PrefsStore, ViewMode};
 use crate::search::{filter_indices, SearchMode, SearchState};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 
 pub struct LibraryApp {
@@ -223,6 +224,70 @@ impl LibraryApp {
         self.search.mode = SearchMode::Editing;
     }
 
+    /// Consume a raw KeyEvent while in Editing state. Dispatches:
+    /// - Enter → transition Editing → Applied (close box, keep filter)
+    /// - Esc → clear filter, restore pre_search_selection, → Idle
+    /// - Backspace → pop last char, refilter
+    /// - Up/Down/Left/Right → navigate the filtered set (via handle)
+    /// - Ctrl+C → quit the library entirely (matches global Quit)
+    /// - Printable Char → append, refilter, reset selection to 0
+    /// - Anything else → ignore
+    ///
+    /// Caller (library_event_loop) checks `is_searching()` first and
+    /// routes raw KeyEvents here; this bypasses translate() so every
+    /// printable key is available as query input.
+    pub fn handle_search_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                self.search.mode = SearchMode::Applied;
+            }
+            KeyCode::Esc => {
+                self.clear_search();
+            }
+            KeyCode::Backspace => {
+                self.search.query.pop();
+                self.refilter();
+                self.selection = 0;
+            }
+            KeyCode::Up => {
+                self.handle(Action::LineUp);
+            }
+            KeyCode::Down => {
+                self.handle(Action::LineDown);
+            }
+            KeyCode::Left => {
+                self.handle(Action::PagePrev);
+            }
+            KeyCode::Right => {
+                self.handle(Action::PageNext);
+            }
+            KeyCode::Char(c) => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    // Ctrl+C quits the library (mirrors the global Quit).
+                    // Other Ctrl combos ignored.
+                    if c == 'c' {
+                        self.should_quit = true;
+                    }
+                    return;
+                }
+                self.search.query.push(c);
+                self.refilter();
+                self.selection = 0;
+            }
+            _ => {}
+        }
+    }
+
+    /// Clear the search state: empty query, drop filter, return to Idle,
+    /// restore the selection that was active when search began. Called
+    /// by Esc in either Editing or Applied state.
+    fn clear_search(&mut self) {
+        self.search.query.clear();
+        self.search.filtered.clear();
+        self.search.mode = SearchMode::Idle;
+        self.selection = self.pre_search_selection;
+    }
+
     /// Recompute `search.filtered` from `search.query`. Called after
     /// every query mutation.
     fn refilter(&mut self) {
@@ -314,7 +379,11 @@ impl LibraryApp {
                 }
             }
             Action::Quit => {
-                self.should_quit = true;
+                if matches!(self.search.mode, SearchMode::Applied) {
+                    self.clear_search();
+                } else {
+                    self.should_quit = true;
+                }
             }
             Action::Resize(w, h) => {
                 self.viewport_size = (w, h);
@@ -698,5 +767,191 @@ mod tests {
         // pre_search_selection or reset query (idempotent re-open).
         app.handle(Action::OpenSearch);
         assert_eq!(app.search_mode(), SearchMode::Editing);
+    }
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn key_press(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn ctrl_c_key() -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn search_entry(title: &str, author: &str) -> LibraryEntry {
+        LibraryEntry {
+            path: PathBuf::from(format!("/{title}.epub")),
+            title: title.to_string(),
+            author: author.to_string(),
+        }
+    }
+
+    #[test]
+    fn typing_chars_updates_query_and_refilters() {
+        let mut app = LibraryApp::new_with(
+            vec![
+                search_entry("Firefly", "A"),
+                search_entry("Threshold", "B"),
+                search_entry("Tomorrow", "C"),
+            ],
+            (80, 24),
+            None,
+            None,
+        );
+        app.handle(Action::OpenSearch);
+        app.handle_search_input(key_press(KeyCode::Char('f')));
+        app.handle_search_input(key_press(KeyCode::Char('i')));
+        assert_eq!(app.search_query(), "fi");
+        assert_eq!(app.display_indices(), &[0], "only 'Firefly' matches 'fi'");
+    }
+
+    #[test]
+    fn backspace_pops_query_and_refilters() {
+        let mut app = LibraryApp::new_with(
+            vec![
+                search_entry("Firefly", "A"),
+                search_entry("Threshold", "B"),
+            ],
+            (80, 24),
+            None,
+            None,
+        );
+        app.handle(Action::OpenSearch);
+        app.handle_search_input(key_press(KeyCode::Char('f')));
+        app.handle_search_input(key_press(KeyCode::Char('i')));
+        assert_eq!(app.display_indices(), &[0]);
+        app.handle_search_input(key_press(KeyCode::Backspace));
+        assert_eq!(app.search_query(), "f");
+        // 'f' matches "Firefly" but not "Threshold"
+        assert_eq!(app.display_indices(), &[0]);
+        app.handle_search_input(key_press(KeyCode::Backspace));
+        assert_eq!(app.search_query(), "");
+        // Empty query matches all
+        assert_eq!(app.display_indices(), &[0, 1]);
+    }
+
+    #[test]
+    fn enter_transitions_editing_to_applied() {
+        let mut app = LibraryApp::new_with(
+            vec![search_entry("A", "X")],
+            (80, 24),
+            None,
+            None,
+        );
+        app.handle(Action::OpenSearch);
+        assert_eq!(app.search_mode(), SearchMode::Editing);
+        app.handle_search_input(key_press(KeyCode::Enter));
+        assert_eq!(app.search_mode(), SearchMode::Applied);
+        assert!(!app.is_searching(), "is_searching is false in Applied");
+        assert!(app.has_filter(), "has_filter is true in Applied");
+    }
+
+    #[test]
+    fn esc_from_editing_clears_filter_and_restores_selection() {
+        let mut app = LibraryApp::new_with(
+            vec![
+                search_entry("A", "X"),
+                search_entry("B", "Y"),
+                search_entry("C", "Z"),
+            ],
+            (80, 24),
+            None,
+            None,
+        );
+        app.handle(Action::LineDown);
+        app.handle(Action::LineDown);
+        assert_eq!(app.selection(), 2);
+        app.handle(Action::OpenSearch);
+        app.handle_search_input(key_press(KeyCode::Char('a')));
+        assert_eq!(app.display_indices(), &[0]);
+        app.handle_search_input(key_press(KeyCode::Esc));
+        assert_eq!(app.search_mode(), SearchMode::Idle);
+        assert!(!app.has_filter());
+        assert_eq!(app.selection(), 2, "selection restored to pre-search value");
+    }
+
+    #[test]
+    fn esc_from_applied_clears_filter() {
+        let mut app = LibraryApp::new_with(
+            vec![search_entry("A", "X"), search_entry("B", "Y")],
+            (80, 24),
+            None,
+            None,
+        );
+        app.handle(Action::OpenSearch);
+        app.handle_search_input(key_press(KeyCode::Char('a')));
+        app.handle_search_input(key_press(KeyCode::Enter)); // → Applied
+        assert_eq!(app.search_mode(), SearchMode::Applied);
+        // Esc translates to Action::Quit; in Applied, that should clear
+        // the filter rather than quit.
+        app.handle(Action::Quit);
+        assert_eq!(app.search_mode(), SearchMode::Idle);
+        assert!(!app.should_quit(), "Esc from Applied must not quit");
+    }
+
+    #[test]
+    fn arrow_keys_in_editing_navigate_filtered_results() {
+        let mut app = LibraryApp::new_with(
+            vec![
+                search_entry("Foo One", "A"),
+                search_entry("Foo Two", "B"),
+                search_entry("Bar", "C"),
+                search_entry("Foo Three", "D"),
+            ],
+            (80, 24),
+            None,
+            None,
+        );
+        app.handle(Action::OpenSearch);
+        app.handle_search_input(key_press(KeyCode::Char('f')));
+        app.handle_search_input(key_press(KeyCode::Char('o')));
+        app.handle_search_input(key_press(KeyCode::Char('o')));
+        // 3 matches: Foo One, Foo Two, Foo Three (indices 0, 1, 3)
+        assert_eq!(app.display_indices(), &[0, 1, 3]);
+        assert_eq!(app.selection(), 0);
+        // Down arrow in Editing should advance selection within the filtered set.
+        // In Grid mode (default for new_with with no prefs), LineDown moves by cols.
+        // Toggle to list mode first to make the test deterministic.
+        app.handle_search_input(key_press(KeyCode::Esc)); // exit search
+        app.handle(Action::ToggleViewMode); // → List
+        app.handle(Action::OpenSearch);
+        app.handle_search_input(key_press(KeyCode::Char('f')));
+        app.handle_search_input(key_press(KeyCode::Char('o')));
+        app.handle_search_input(key_press(KeyCode::Char('o')));
+        app.handle_search_input(key_press(KeyCode::Down));
+        assert_eq!(app.selection(), 1);
+        app.handle_search_input(key_press(KeyCode::Down));
+        assert_eq!(app.selection(), 2);
+        // Confirm opens the 3rd match (display index 2 → entry index 3 = "Foo Three").
+        app.handle_search_input(key_press(KeyCode::Enter)); // → Applied
+        app.handle(Action::Confirm);
+        assert_eq!(
+            app.selected_path().map(|p| p.to_string_lossy().into_owned()),
+            Some("/Foo Three.epub".to_string())
+        );
+    }
+
+    #[test]
+    fn ctrl_c_in_editing_quits_library() {
+        let mut app = LibraryApp::new_with(
+            vec![search_entry("A", "X")],
+            (80, 24),
+            None,
+            None,
+        );
+        app.handle(Action::OpenSearch);
+        app.handle_search_input(ctrl_c_key());
+        assert!(app.should_quit());
     }
 }
