@@ -174,5 +174,9 @@ mod tests {
             translate(key(KeyCode::Char('/'))),
             Some(Action::OpenSearch)
         );
+        // Some terminals report bare '/' with SHIFT set; the binding
+        // accepts both (mirrors the ? / ToggleHelp pattern).
+        let shift_slash = key_with(KeyCode::Char('/'), KeyModifiers::SHIFT);
+        assert_eq!(translate(shift_slash), Some(Action::OpenSearch));
     }
 }
