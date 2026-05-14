@@ -104,66 +104,6 @@ fn toc_filtering_classifies_front_matter() {
     assert!(any_main, "expected at least one Main chapter");
 }
 
-/// Pinned shape of `books/Threshold (Will Wight).epub` — fails loudly if
-/// the TOC parser regresses or the EPUB is replaced with a different one.
-/// Numbers determined empirically against the v0.1 implementation; if
-/// these change, investigate before bumping.
-#[test]
-fn threshold_known_structure() {
-    let Some(path) = require_book(Some("books/Threshold (Will Wight).epub")) else {
-        return;
-    };
-    let book = Book::open(&path, cleader::reader::DEFAULT_MAX_BODY_WIDTH).unwrap();
-    assert_eq!(book.title, "Threshold");
-    assert_eq!(book.author, "Will Wight");
-    assert_eq!(book.chapters.len(), 20, "total chapters (incl. cover)");
-
-    let main = book
-        .chapters
-        .iter()
-        .filter(|c| matches!(c.kind, cleader::epub::ChapterKind::Main))
-        .count();
-    let front = book
-        .chapters
-        .iter()
-        .filter(|c| matches!(c.kind, cleader::epub::ChapterKind::FrontMatter))
-        .count();
-    assert_eq!(main, 19, "main chapters");
-    assert_eq!(front, 1, "front matter (cover only)");
-
-    // First chapter is the cover (FrontMatter, image-only).
-    assert!(matches!(book.chapters[0].kind, cleader::epub::ChapterKind::FrontMatter));
-    assert_eq!(book.chapters[0].title.as_deref(), Some("Threshold"));
-
-    // Real first reading chapter is "The First Uncrowned King" at index 3.
-    assert_eq!(
-        book.chapters[3].title.as_deref(),
-        Some("The First Uncrowned King")
-    );
-}
-
-#[test]
-fn threshold_cover_is_rendered_as_ascii_art() {
-    use cleader::epub::{Block, ChapterKind};
-    let Some(path) = require_book(Some("books/Threshold (Will Wight).epub")) else {
-        return;
-    };
-    let book = Book::open(&path, cleader::reader::DEFAULT_MAX_BODY_WIDTH).unwrap();
-    let cover = book
-        .chapters
-        .iter()
-        .find(|c| matches!(c.kind, ChapterKind::FrontMatter))
-        .expect("Threshold should have a FrontMatter chapter (cover)");
-    let has_image_block = cover
-        .blocks
-        .iter()
-        .any(|b| matches!(b, Block::Image(_)));
-    assert!(
-        has_image_block,
-        "Threshold cover should be rendered as Block::Image (ASCII art)"
-    );
-}
-
 #[test]
 fn books_with_inline_images_render_them_as_ascii_art() {
     use cleader::epub::{Block, ChapterKind};

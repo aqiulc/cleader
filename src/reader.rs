@@ -865,7 +865,7 @@ mod tests {
     #[test]
     fn status_bar_fits_exact_terminal_width() {
         let bar = build_status_bar(StatusInput {
-            title: "Firefly",
+            title: "Frankenstein",
             chapter_display: Some((4, 22)),
             page: 18,
             total_pages: 247,
@@ -873,7 +873,7 @@ mod tests {
             width: 80,
         });
         assert_eq!(UnicodeWidthStr::width(bar.as_str()), 80);
-        assert!(bar.contains("Firefly"));
+        assert!(bar.contains("Frankenstein"));
         assert!(bar.contains("Ch 4/22"));
         assert!(bar.contains("Page 18/247"));
         assert!(bar.contains("q quit"));

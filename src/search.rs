@@ -56,12 +56,13 @@ mod tests {
 
     fn corpus() -> Vec<String> {
         // Pre-lowercased title\nauthor strings, simulating the parallel
-        // array that LibraryApp builds at construction time.
+        // array that LibraryApp builds at construction time. Public-domain
+        // titles chosen so tests can be redistributed freely.
         vec![
-            "firefly: generations\ntim lebbon".to_string(),
-            "firefly: the magnificent nine\nj.m. straczynski".to_string(),
-            "threshold\nclive cussler".to_string(),
-            "tomorrow, and tomorrow, and tomorrow\ngabrielle zevin".to_string(),
+            "frankenstein\nmary shelley".to_string(),
+            "the last man\nmary shelley".to_string(),
+            "dracula\nbram stoker".to_string(),
+            "the time machine\nh g wells".to_string(),
         ]
     }
 
@@ -74,8 +75,8 @@ mod tests {
     #[test]
     fn full_word_match() {
         let c = corpus();
-        // "firefly" appears as a full word in entries 0 and 1.
-        assert_eq!(filter_indices(&c, "firefly"), vec![0, 1]);
+        // "shelley" appears as the author of entries 0 and 1.
+        assert_eq!(filter_indices(&c, "shelley"), vec![0, 1]);
     }
 
     #[test]
@@ -87,27 +88,27 @@ mod tests {
     #[test]
     fn author_match_works() {
         let c = corpus();
-        assert_eq!(filter_indices(&c, "lebbon"), vec![0]);
+        assert_eq!(filter_indices(&c, "stoker"), vec![2]);
     }
 
     #[test]
     fn mid_word_substring_match() {
         let c = corpus();
-        // "morrow" appears mid-word in "tomorrow"
-        assert_eq!(filter_indices(&c, "morrow"), vec![3]);
+        // "achine" appears mid-word in "machine"
+        assert_eq!(filter_indices(&c, "achine"), vec![3]);
     }
 
     #[test]
     fn multi_match_preserves_source_order() {
         let c = corpus();
-        let r = filter_indices(&c, "fire");
+        let r = filter_indices(&c, "shell");
         assert_eq!(r, vec![0, 1]);
     }
 
     #[test]
     fn title_match_works() {
         let c = corpus();
-        assert_eq!(filter_indices(&c, "threshold"), vec![2]);
+        assert_eq!(filter_indices(&c, "dracula"), vec![2]);
     }
 
     #[test]

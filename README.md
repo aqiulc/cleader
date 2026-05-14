@@ -4,7 +4,7 @@ A distraction-free terminal EPUB reader. Opens a single book or a whole
 directory; remembers where you left off; never gets in your way.
 
 ```
-  ── Firefly: Generations ─ Ch 4/22 ─ Page 18/247 ─ q quit ──
+  ── Frankenstein ─ Ch 4/24 ─ Page 18/247 ─ q quit ──
 ```
 
 ## Install

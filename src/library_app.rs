@@ -887,9 +887,9 @@ mod tests {
     fn typing_chars_updates_query_and_refilters() {
         let mut app = LibraryApp::new_with(
             vec![
-                search_entry("Firefly", "A"),
-                search_entry("Threshold", "B"),
-                search_entry("Tomorrow", "C"),
+                search_entry("Frankenstein", "A"),
+                search_entry("Dracula", "B"),
+                search_entry("Aurora Leigh", "C"),
             ],
             (80, 24),
             None,
@@ -897,17 +897,17 @@ mod tests {
         );
         app.handle(Action::OpenSearch);
         app.handle_search_input(key_press(KeyCode::Char('f')));
-        app.handle_search_input(key_press(KeyCode::Char('i')));
-        assert_eq!(app.search_query(), "fi");
-        assert_eq!(app.display_indices(), &[0], "only 'Firefly' matches 'fi'");
+        app.handle_search_input(key_press(KeyCode::Char('r')));
+        assert_eq!(app.search_query(), "fr");
+        assert_eq!(app.display_indices(), &[0], "only 'Frankenstein' matches 'fr'");
     }
 
     #[test]
     fn backspace_pops_query_and_refilters() {
         let mut app = LibraryApp::new_with(
             vec![
-                search_entry("Firefly", "A"),
-                search_entry("Threshold", "B"),
+                search_entry("Frankenstein", "A"),
+                search_entry("Dracula", "B"),
             ],
             (80, 24),
             None,
@@ -915,11 +915,11 @@ mod tests {
         );
         app.handle(Action::OpenSearch);
         app.handle_search_input(key_press(KeyCode::Char('f')));
-        app.handle_search_input(key_press(KeyCode::Char('i')));
+        app.handle_search_input(key_press(KeyCode::Char('r')));
         assert_eq!(app.display_indices(), &[0]);
         app.handle_search_input(key_press(KeyCode::Backspace));
         assert_eq!(app.search_query(), "f");
-        // 'f' matches "Firefly" but not "Threshold"
+        // 'f' matches "Frankenstein" but not "Dracula"
         assert_eq!(app.display_indices(), &[0]);
         app.handle_search_input(key_press(KeyCode::Backspace));
         assert_eq!(app.search_query(), "");

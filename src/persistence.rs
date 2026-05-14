@@ -129,8 +129,8 @@ mod tests {
         reg.books.insert(
             "/path/to/book.epub".into(),
             Position {
-                title: "Firefly".into(),
-                author: "Tim Lebbon".into(),
+                title: "Frankenstein".into(),
+                author: "Mary Shelley".into(),
                 chapter_idx: 4,
                 line_offset: 312,
                 last_read: DateTime::parse_from_rfc3339("2026-05-03T11:53:00Z")
