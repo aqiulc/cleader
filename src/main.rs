@@ -283,6 +283,7 @@ fn library_event_loop(
             // loop body.
             let marquee_offset_val: usize =
                 cleader::library_app::marquee_offset(app.marquee_elapsed_ms(), selected_overflow);
+            let show_help = app.show_help();
 
             terminal.draw(|frame| {
                 let area = frame.area();
@@ -300,6 +301,7 @@ fn library_event_loop(
                         search_query: search_query_owned.as_deref(),
                         search_mode,
                         marquee_offset: marquee_offset_val,
+                        show_help,
                     },
                 );
             })?;

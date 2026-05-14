@@ -41,14 +41,20 @@ pub struct LibraryRenderInput<'a> {
     /// LibraryApp::marquee_elapsed_ms and the selected cell's title
     /// overflow.
     pub marquee_offset: usize,
+    /// True when the help overlay should be drawn on top of everything.
+    pub show_help: bool,
 }
 
 pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'_>) {
     use crate::prefs::ViewMode;
     let force_list = area.width < CELL_WIDTH || area.height < (CELL_HEIGHT + 2);
+    let show_help = input.show_help;
     match (input.view_mode, force_list) {
         (ViewMode::Grid, false) => render_library_grid(frame, area, input),
         _ => render_library_list(frame, area, input),
+    }
+    if show_help {
+        crate::help::render_help_overlay(frame, area);
     }
 }
 
@@ -151,7 +157,7 @@ fn render_library_list(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
             query: input.search_query,
             matches: input.display_indices.len(),
             warning: input.warning,
-            default_hint: " Enter open · ↑↓ navigate · / search · g grid · q quit ",
+            default_hint: " Enter open · ↑↓ navigate · / search · g grid · ? help · q quit ",
         },
     );
 }
@@ -304,7 +310,7 @@ fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
             query: input.search_query,
             matches: input.display_indices.len(),
             warning: input.warning,
-            default_hint: " Enter open · ↑↓ navigate · / search · g list · q quit ",
+            default_hint: " Enter open · ↑↓ navigate · / search · g list · ? help · q quit ",
         },
     );
 }
@@ -456,6 +462,7 @@ mod tests {
                 search_query: None,
                 search_mode: crate::search::SearchMode::Idle,
                 marquee_offset: 0,
+                show_help: false,
             });
         }).unwrap();
     }
@@ -484,6 +491,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    show_help: false,
                 },
             );
         })
@@ -513,6 +521,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    show_help: false,
                 },
             );
         })
@@ -555,6 +564,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    show_help: false,
                 },
             );
         })
@@ -598,6 +608,7 @@ mod tests {
                         search_query: None,
                         search_mode: crate::search::SearchMode::Idle,
                         marquee_offset: 0,
+                        show_help: false,
                     },
                 );
             })
@@ -643,6 +654,7 @@ mod tests {
                     search_query: Some("book"),
                     search_mode: crate::search::SearchMode::Editing,
                     marquee_offset: 0,
+                    show_help: false,
                 },
             );
         })
@@ -678,6 +690,7 @@ mod tests {
                     search_query: Some("book"),
                     search_mode: crate::search::SearchMode::Applied,
                     marquee_offset: 0,
+                    show_help: false,
                 },
             );
         })
@@ -713,6 +726,7 @@ mod tests {
                     search_query: Some("xyz"),
                     search_mode: crate::search::SearchMode::Editing,
                     marquee_offset: 0,
+                    show_help: false,
                 },
             );
         })
@@ -778,6 +792,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    show_help: false,
                 },
             );
         })
@@ -804,6 +819,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 7,
+                    show_help: false,
                 },
             );
         })
@@ -850,6 +866,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 7,
+                    show_help: false,
                 },
             );
         })
@@ -862,5 +879,40 @@ mod tests {
             buf.contains("MMMMMM"),
             "non-selected cell title should NOT be shifted by marquee_offset; got buffer:\n{buf}"
         );
+    }
+
+    #[test]
+    fn help_overlay_renders_in_library_view() {
+        let backend = TestBackend::new(80, 40);
+        let mut term = Terminal::new(backend).unwrap();
+        let entries = vec![lib_entry("Book")];
+        let book_ids = vec![None];
+        let display_indices = vec![0];
+        term.draw(|frame| {
+            let area = frame.area();
+            render_library(
+                frame,
+                area,
+                LibraryRenderInput {
+                    entries: &entries,
+                    selection: 0,
+                    view_mode: ViewMode::Grid,
+                    cover_cache: None,
+                    book_ids: &book_ids,
+                    warning: None,
+                    display_indices: &display_indices,
+                    search_query: None,
+                    search_mode: crate::search::SearchMode::Idle,
+                    marquee_offset: 0,
+                    show_help: true,
+                },
+            );
+        })
+        .unwrap();
+        let buf: String = term.backend().buffer().content.iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(buf.contains("Key bindings"), "help overlay title should appear");
+        assert!(buf.contains("Aqiul"), "creator info should appear");
     }
 }

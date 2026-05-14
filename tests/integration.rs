@@ -296,6 +296,7 @@ fn library_grid_renders_without_panic_when_directory_has_epubs() {
                 search_query: None,
                 search_mode: cleader::search::SearchMode::Idle,
                 marquee_offset: 0,
+                show_help: false,
             },
         );
     })

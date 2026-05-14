@@ -88,6 +88,10 @@ pub struct LibraryApp {
     /// every new selection begins at the start-of-cycle hold). `None`
     /// only at construction before the first selection change.
     marquee_start: Option<Instant>,
+    /// True when the help overlay is showing. Set by `Action::ToggleHelp`,
+    /// cleared by the same action or by `Action::Quit` (so Esc dismisses
+    /// the overlay rather than quitting the library).
+    show_help: bool,
 }
 
 impl LibraryApp {
@@ -134,6 +138,7 @@ impl LibraryApp {
             search: SearchState::default(),
             pre_search_selection: 0,
             marquee_start: Some(Instant::now()),
+            show_help: false,
         }
     }
 
@@ -201,6 +206,10 @@ impl LibraryApp {
         self.marquee_start
             .map(|start| start.elapsed().as_millis())
             .unwrap_or(0)
+    }
+
+    pub fn show_help(&self) -> bool {
+        self.show_help
     }
 
     /// Request covers for the given entry indices. Resolves each index
@@ -451,11 +460,9 @@ impl LibraryApp {
                 }
             }
             Action::Quit => {
-                // In Applied state, Esc clears the filter rather than
-                // quitting (two-Esc pattern: first Esc closes the filter,
-                // a second Esc actually quits the library). This matches
-                // the modal-overlay convention used elsewhere in cleader.
-                if matches!(self.search.mode, SearchMode::Applied) {
+                if self.show_help {
+                    self.show_help = false;
+                } else if matches!(self.search.mode, SearchMode::Applied) {
                     self.clear_search();
                 } else {
                     self.should_quit = true;
@@ -465,15 +472,19 @@ impl LibraryApp {
                 self.viewport_size = (w, h);
             }
             Action::ToggleViewMode => {
+                self.show_help = false;
                 self.toggle_view_mode();
             }
             Action::OpenSearch => {
+                self.show_help = false;
                 self.open_search();
+            }
+            Action::ToggleHelp => {
+                self.show_help = !self.show_help;
             }
             // Reader-only actions are no-ops in library mode.
             Action::ChapterNext
             | Action::ChapterPrev
-            | Action::ToggleHelp
             | Action::ToggleToc => {}
         }
     }
@@ -1107,6 +1118,66 @@ mod tests {
         let cycle_ms = 1000 + 5 * 250 + 1000;
         assert_eq!(super::marquee_offset(cycle_ms, 5), 0);
         assert_eq!(super::marquee_offset(cycle_ms + 500, 5), 0);
+    }
+
+    #[test]
+    fn toggle_help_flips_show_help() {
+        let mut app = LibraryApp::new_with(
+            vec![entry("A")],
+            (80, 24),
+            None,
+            None,
+        );
+        assert!(!app.show_help());
+        app.handle(Action::ToggleHelp);
+        assert!(app.show_help());
+        app.handle(Action::ToggleHelp);
+        assert!(!app.show_help());
+    }
+
+    #[test]
+    fn esc_dismisses_help_without_quitting() {
+        let mut app = LibraryApp::new_with(
+            vec![entry("A")],
+            (80, 24),
+            None,
+            None,
+        );
+        app.handle(Action::ToggleHelp);
+        assert!(app.show_help());
+        app.handle(Action::Quit);
+        assert!(!app.show_help(), "Esc should dismiss help");
+        assert!(!app.should_quit(), "Esc with help up should not quit");
+    }
+
+    #[test]
+    fn open_search_dismisses_help() {
+        let mut app = LibraryApp::new_with(
+            vec![entry("A")],
+            (80, 24),
+            None,
+            None,
+        );
+        app.handle(Action::ToggleHelp);
+        assert!(app.show_help());
+        app.handle(Action::OpenSearch);
+        assert!(!app.show_help(), "opening search should dismiss help");
+        assert_eq!(app.search_mode(), SearchMode::Editing);
+    }
+
+    #[test]
+    fn toggle_view_mode_dismisses_help() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = LibraryApp::new_with(
+            vec![entry("A")],
+            (80, 24),
+            Some(fresh_prefs(dir.path())),
+            None,
+        );
+        app.handle(Action::ToggleHelp);
+        assert!(app.show_help());
+        app.handle(Action::ToggleViewMode);
+        assert!(!app.show_help(), "toggling view mode should dismiss help");
     }
 
     #[test]
