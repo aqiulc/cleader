@@ -9,3 +9,4 @@ pub mod library_app;
 pub mod persistence;
 pub mod prefs;
 pub mod reader;
+pub mod search;
