@@ -708,7 +708,9 @@ fn render_library_list(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
         ])
         .split(area);
 
-    // Title bar.
+    // Title bar shows total library size, NOT the filtered match count
+    // (which the footer surfaces as "N matches"). This deliberate split
+    // gives the user both numbers at a glance.
     let title = TuiSpan::styled(
         format!(" cleader library — {} book(s) ", input.entries.len()),
         Style::default().add_modifier(Modifier::BOLD),
@@ -776,7 +778,9 @@ fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
         ])
         .split(area);
 
-    // Title bar.
+    // Title bar shows total library size, NOT the filtered match count
+    // (which the footer surfaces as "N matches"). This deliberate split
+    // gives the user both numbers at a glance.
     let title = TuiSpan::styled(
         format!(" cleader library — {} book(s) ", input.entries.len()),
         Style::default().add_modifier(Modifier::BOLD),

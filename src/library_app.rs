@@ -744,8 +744,8 @@ mod tests {
         assert_eq!(app.selection(), 2);
         app.handle(Action::OpenSearch);
         assert_eq!(app.selection(), 0, "selection resets to 0 on open_search");
-        // pre_search_selection is captured (not directly observable; we
-        // verify it by Esc-style restore in Task 4's tests).
+        // pre_search_selection is captured (not directly observable;
+        // verified by Esc restore in esc_from_editing_clears_filter_and_restores_selection).
     }
 
     #[test]
@@ -784,7 +784,7 @@ mod tests {
         // Re-pressing OpenSearch while already in Editing should not
         // reset state — it leaves mode, query, and pre_search_selection
         // intact. The full Applied → Editing round-trip is verified in
-        // Task 4's tests (which exercise Enter and Esc).
+        // enter_transitions_editing_to_applied and esc_from_applied_clears_filter.
         let mut app = LibraryApp::new_with(
             vec![entry("A"), entry("B")],
             (80, 24),
@@ -956,5 +956,45 @@ mod tests {
         app.handle(Action::OpenSearch);
         app.handle_search_input(ctrl_c_key());
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn applied_filter_survives_reset_for_reselection() {
+        // After picking a book from filtered results and returning from
+        // the reader, the search state must survive: selection stays at
+        // the filtered position, the filter is still applied. This pins
+        // reset_for_reselection's deliberate non-touch of search state.
+        let mut app = LibraryApp::new_with(
+            vec![
+                search_entry("Foo One", "A"),
+                search_entry("Bar", "B"),
+                search_entry("Foo Two", "C"),
+            ],
+            (80, 24),
+            None,
+            None,
+        );
+        // Toggle to list mode so selection movement is deterministic.
+        app.handle(Action::ToggleViewMode);
+        app.handle(Action::OpenSearch);
+        app.handle_search_input(key_press(KeyCode::Char('f')));
+        app.handle_search_input(key_press(KeyCode::Char('o')));
+        app.handle_search_input(key_press(KeyCode::Char('o')));
+        app.handle_search_input(key_press(KeyCode::Down)); // select Foo Two
+        app.handle_search_input(key_press(KeyCode::Enter)); // → Applied
+        assert_eq!(app.search_mode(), SearchMode::Applied);
+        assert_eq!(app.selection(), 1);
+        assert_eq!(app.display_indices(), &[0, 2]);
+
+        // Simulate Confirm-then-reader-quit path.
+        app.handle(Action::Confirm); // sets should_quit + selected_path
+        app.reset_for_reselection();
+
+        // Filter still applied, selection still at filtered position.
+        assert_eq!(app.search_mode(), SearchMode::Applied);
+        assert_eq!(app.selection(), 1);
+        assert_eq!(app.display_indices(), &[0, 2]);
+        assert!(!app.should_quit());
+        assert!(app.selected_path().is_none());
     }
 }
