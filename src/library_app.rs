@@ -14,6 +14,7 @@ use crate::prefs::{PrefsStore, ViewMode};
 use crate::search::{filter_indices, SearchMode, SearchState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
+use std::time::Instant;
 
 /// Time to hold at the start of a long title before scrolling begins,
 /// so the user can read the beginning. 1000 ms.
@@ -82,6 +83,11 @@ pub struct LibraryApp {
     search: SearchState,
     /// Selection captured when search began. Restored on Esc clear.
     pre_search_selection: usize,
+    /// When the currently-selected cell started its marquee animation.
+    /// Reset to `Some(Instant::now())` whenever `selection` changes (so
+    /// every new selection begins at the start-of-cycle hold). `None`
+    /// only at construction before the first selection change.
+    marquee_start: Option<Instant>,
 }
 
 impl LibraryApp {
@@ -127,6 +133,7 @@ impl LibraryApp {
             save_error: None,
             search: SearchState::default(),
             pre_search_selection: 0,
+            marquee_start: Some(Instant::now()),
         }
     }
 
@@ -184,6 +191,16 @@ impl LibraryApp {
 
     pub fn save_error(&self) -> Option<&str> {
         self.save_error.as_deref()
+    }
+
+    /// Elapsed milliseconds since the marquee started. Renderer uses
+    /// this with the current title's overflow to compute the scroll
+    /// offset via `marquee_offset`. Returns 0 if marquee is somehow
+    /// unset (defensive — should always be Some after construction).
+    pub fn marquee_elapsed_ms(&self) -> u128 {
+        self.marquee_start
+            .map(|start| start.elapsed().as_millis())
+            .unwrap_or(0)
     }
 
     /// Request covers for the given entry indices. Resolves each index
@@ -259,7 +276,7 @@ impl LibraryApp {
             self.pre_search_selection = self.selection;
             self.search.query.clear();
             self.refilter();
-            self.selection = 0;
+            self.set_selection(0);
         }
         self.search.mode = SearchMode::Editing;
     }
@@ -287,7 +304,7 @@ impl LibraryApp {
             KeyCode::Backspace => {
                 self.search.query.pop();
                 self.refilter();
-                self.selection = 0;
+                self.set_selection(0);
             }
             KeyCode::Up => {
                 self.handle(Action::LineUp);
@@ -312,7 +329,7 @@ impl LibraryApp {
                 }
                 self.search.query.push(c);
                 self.refilter();
-                self.selection = 0;
+                self.set_selection(0);
             }
             _ => {}
         }
@@ -325,7 +342,7 @@ impl LibraryApp {
         self.search.query.clear();
         self.search.filtered.clear();
         self.search.mode = SearchMode::Idle;
-        self.selection = self.pre_search_selection;
+        self.set_selection(self.pre_search_selection);
     }
 
     /// Recompute `search.filtered` from `search.query`. Called after
@@ -333,6 +350,17 @@ impl LibraryApp {
     fn refilter(&mut self) {
         let query_lc = self.search.query.to_lowercase();
         self.search.filtered = filter_indices(&self.entries_lowercased, &query_lc);
+    }
+
+    /// Set the selection and restart the marquee animation. All nav
+    /// arms in `handle` should go through this helper rather than
+    /// mutating `self.selection` directly — that way every selection
+    /// change resets the marquee cycle to the start-of-hold phase.
+    fn set_selection(&mut self, new_selection: usize) {
+        if new_selection != self.selection {
+            self.selection = new_selection;
+            self.marquee_start = Some(Instant::now());
+        }
     }
 
     /// Look up an already-computed BookId for a display position.
@@ -373,40 +401,44 @@ impl LibraryApp {
             Action::LineUp => {
                 if matches!(self.view_mode, ViewMode::Grid) {
                     let cols = self.grid_cols();
-                    self.selection = self.selection.saturating_sub(cols);
+                    let new = self.selection.saturating_sub(cols);
+                    self.set_selection(new);
                 } else if self.selection > 0 {
-                    self.selection -= 1;
+                    self.set_selection(self.selection - 1);
                 }
             }
             Action::LineDown => {
                 if matches!(self.view_mode, ViewMode::Grid) {
                     let cols = self.grid_cols();
                     let max = self.display_indices().len().saturating_sub(1);
-                    self.selection = (self.selection + cols).min(max);
+                    let new = (self.selection + cols).min(max);
+                    self.set_selection(new);
                 } else if self.selection + 1 < self.display_indices().len() {
-                    self.selection += 1;
+                    self.set_selection(self.selection + 1);
                 }
             }
             Action::PagePrev => {
                 if matches!(self.view_mode, ViewMode::Grid) {
                     if self.selection > 0 {
-                        self.selection -= 1;
+                        self.set_selection(self.selection - 1);
                     }
                 } else {
                     let step = self.lines_per_page().min(10);
-                    self.selection = self.selection.saturating_sub(step);
+                    let new = self.selection.saturating_sub(step);
+                    self.set_selection(new);
                 }
             }
             Action::PageNext => {
                 if matches!(self.view_mode, ViewMode::Grid) {
                     let max = self.display_indices().len().saturating_sub(1);
                     if self.selection < max {
-                        self.selection += 1;
+                        self.set_selection(self.selection + 1);
                     }
                 } else {
                     let step = self.lines_per_page().min(10);
                     let max = self.display_indices().len().saturating_sub(1);
-                    self.selection = (self.selection + step).min(max);
+                    let new = (self.selection + step).min(max);
+                    self.set_selection(new);
                 }
             }
             Action::Confirm => {
@@ -1075,5 +1107,28 @@ mod tests {
         let cycle_ms = 1000 + 5 * 250 + 1000;
         assert_eq!(super::marquee_offset(cycle_ms, 5), 0);
         assert_eq!(super::marquee_offset(cycle_ms + 500, 5), 0);
+    }
+
+    #[test]
+    fn selection_change_resets_marquee_start() {
+        let mut app = LibraryApp::new_with(
+            vec![entry("A"), entry("B"), entry("C")],
+            (80, 24),
+            None,
+            None,
+        );
+        // Toggle to list mode so LineDown moves by 1 deterministically.
+        app.handle(Action::ToggleViewMode);
+        // Sleep briefly to ensure elapsed advances.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let elapsed_pre_nav = app.marquee_elapsed_ms();
+        assert!(elapsed_pre_nav >= 10, "elapsed should reflect the sleep");
+        // Navigate — should reset marquee_start.
+        app.handle(Action::LineDown);
+        let elapsed_post_nav = app.marquee_elapsed_ms();
+        assert!(
+            elapsed_post_nav < elapsed_pre_nav,
+            "selection change should reset marquee_start; got pre={elapsed_pre_nav} post={elapsed_post_nav}"
+        );
     }
 }
