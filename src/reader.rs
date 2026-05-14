@@ -638,6 +638,18 @@ pub struct LibraryRenderInput<'a> {
     pub book_ids: &'a [Option<crate::epub::BookId>],
     /// Optional warning to surface in the footer (e.g. prefs save error).
     pub warning: Option<&'a str>,
+    /// Indices into `entries` that should be shown. Either the full
+    /// range (`0..entries.len()`) when no search filter is active, or
+    /// the matching subset otherwise. Renderer iterates this; `selection`
+    /// indexes into this sequence (not into `entries` directly).
+    pub display_indices: &'a [usize],
+    /// Current search query (for the footer search-box rendering).
+    /// `None` when in Idle. `Some` even with an empty string when in
+    /// Editing (to draw the cursor).
+    pub search_query: Option<&'a str>,
+    /// Current search mode. Drives footer rendering and the "no matches"
+    /// content overlay.
+    pub search_mode: crate::search::SearchMode,
 }
 
 pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'_>) {
@@ -703,51 +715,58 @@ fn render_library_list(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
     );
     frame.render_widget(Paragraph::new(Line::from(title)), chunks[0]);
 
-    // List body.
-    let visible_rows = chunks[1].height as usize;
-    let scroll = center_scroll(input.selection, input.entries.len(), visible_rows);
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible_rows);
-    for abs in scroll..(scroll + visible_rows).min(input.entries.len()) {
-        let entry = &input.entries[abs];
-        let is_selected = abs == input.selection;
-        let style = if is_selected {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default()
-        };
-        let label = format!(
-            "  {:>3}. {}  —  {}",
-            abs + 1,
-            entry.title,
-            entry.author
-        );
-        lines.push(Line::from(TuiSpan::styled(label, style)));
-    }
-    frame.render_widget(
-        Paragraph::new(lines).block(TuiBlock::default().borders(Borders::NONE)),
-        chunks[1],
-    );
-
-    // Footer hint or warning.
-    let footer_text = match input.warning {
-        Some(msg) => format!(" ! {msg} ! "),
-        None => " Enter open · ↑↓ navigate · g grid · q quit ".to_string(),
-    };
-    let style = if input.warning.is_some() {
-        Style::default().add_modifier(Modifier::REVERSED)
+    // No-matches case: filter active and 0 results.
+    if input.display_indices.is_empty()
+        && !matches!(input.search_mode, crate::search::SearchMode::Idle)
+    {
+        render_no_matches(frame, chunks[1]);
     } else {
-        Style::default().add_modifier(Modifier::DIM)
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(TuiSpan::styled(footer_text, style))),
+        // List body. `display_indices` is the sequence to render.
+        let visible_rows = chunks[1].height as usize;
+        let total = input.display_indices.len();
+        let scroll = center_scroll(input.selection, total, visible_rows);
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible_rows);
+        for offset in scroll..(scroll + visible_rows).min(total) {
+            let entry_idx = input.display_indices[offset];
+            let entry = &input.entries[entry_idx];
+            let is_selected = offset == input.selection;
+            let style = if is_selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            let label = format!(
+                "  {:>3}. {}  —  {}",
+                entry_idx + 1,
+                entry.title,
+                entry.author
+            );
+            lines.push(Line::from(TuiSpan::styled(label, style)));
+        }
+        frame.render_widget(
+            Paragraph::new(lines).block(TuiBlock::default().borders(Borders::NONE)),
+            chunks[1],
+        );
+    }
+
+    // Footer: search box (if active), warning, or default hint.
+    render_library_footer(
+        frame,
         chunks[2],
+        FooterInput {
+            mode: input.search_mode,
+            query: input.search_query,
+            matches: input.display_indices.len(),
+            warning: input.warning,
+            default_hint: " Enter open · ↑↓ navigate · / search · g grid · q quit ",
+        },
     );
 }
 
 fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'_>) {
     use crate::cover_cache::{COVER_THUMBNAIL_HEIGHT, COVER_THUMBNAIL_WIDTH, PLACEHOLDER};
 
-    // Outer layout: title (1), grid body (Min 1), footer (1).
+    // Outer layout: title (1), grid body (Min CELL_HEIGHT), footer (1).
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -764,119 +783,169 @@ fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
     );
     frame.render_widget(Paragraph::new(Line::from(title)), outer[0]);
 
-    // Grid math.
     let grid_area = outer[1];
-    let cols = (grid_area.width / CELL_WIDTH).max(1) as usize;
-    let rows = (grid_area.height / CELL_HEIGHT).max(1) as usize;
-    let total = input.entries.len();
 
-    // Get the visible index range from the shared helper. Since we're
-    // already past the force_list guard, the helper returns Some.
-    let visible = visible_grid_range(grid_area.width, grid_area.height, total, input.selection)
-        .unwrap_or(0..0);
-    let first_idx = visible.start;
-    let last_idx = visible.end;
+    if input.display_indices.is_empty()
+        && !matches!(input.search_mode, crate::search::SearchMode::Idle)
+    {
+        render_no_matches(frame, grid_area);
+    } else {
+        // Grid math, using display_indices length as total.
+        let total = input.display_indices.len();
+        let cols = (grid_area.width / CELL_WIDTH).max(1) as usize;
+        let rows = (grid_area.height / CELL_HEIGHT).max(1) as usize;
+        let cells_per_screen = cols * rows;
 
-    // Build a vertical stack of horizontal cell rows.
-    let mut cell_rects: Vec<Rect> = Vec::with_capacity(cols * rows);
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Length(CELL_HEIGHT))
-        .collect();
-    let row_rects = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(row_constraints)
-        .split(grid_area);
-    for row_rect in row_rects.iter() {
-        let col_constraints: Vec<Constraint> = (0..cols)
-            .map(|_| Constraint::Length(CELL_WIDTH))
+        let visible = visible_grid_range(grid_area.width, grid_area.height, total, input.selection)
+            .unwrap_or(0..0);
+        let first_idx = visible.start;
+        let last_idx = visible.end;
+
+        // Build a vertical stack of horizontal cell rows.
+        let mut cell_rects: Vec<Rect> = Vec::with_capacity(cells_per_screen);
+        let row_constraints: Vec<Constraint> = (0..rows)
+            .map(|_| Constraint::Length(CELL_HEIGHT))
             .collect();
-        let col_rects = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(col_constraints)
-            .split(*row_rect);
-        for r in col_rects.iter() {
-            cell_rects.push(*r);
+        let row_rects = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(row_constraints)
+            .split(grid_area);
+        for row_rect in row_rects.iter() {
+            let col_constraints: Vec<Constraint> = (0..cols)
+                .map(|_| Constraint::Length(CELL_WIDTH))
+                .collect();
+            let col_rects = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(col_constraints)
+                .split(*row_rect);
+            for r in col_rects.iter() {
+                cell_rects.push(*r);
+            }
+        }
+
+        for (cell_offset, display_pos) in (first_idx..last_idx).enumerate() {
+            let Some(cell_rect) = cell_rects.get(cell_offset) else { break; };
+            let entry_idx = input.display_indices[display_pos];
+            let entry = &input.entries[entry_idx];
+            let is_selected = display_pos == input.selection;
+
+            let border_style = if is_selected {
+                Style::default().fg(ratatui::style::Color::Yellow)
+            } else {
+                Style::default()
+            };
+            let block = TuiBlock::default()
+                .borders(Borders::ALL)
+                .border_style(border_style);
+
+            let inner = block.inner(*cell_rect);
+            frame.render_widget(block, *cell_rect);
+
+            let cell_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(COVER_THUMBNAIL_HEIGHT),
+                    Constraint::Min(1),
+                ])
+                .split(inner);
+
+            let cover_lines: Vec<Line<'static>> = {
+                let cached = input
+                    .book_ids
+                    .get(entry_idx)
+                    .and_then(|opt| opt.as_ref())
+                    .and_then(|id| input.cover_cache.and_then(|c| c.get(id)));
+                match cached {
+                    Some(lines) => lines
+                        .iter()
+                        .take(COVER_THUMBNAIL_HEIGHT as usize)
+                        .map(|l| Line::from(l.clone()))
+                        .collect(),
+                    None => PLACEHOLDER
+                        .iter()
+                        .map(|s| {
+                            Line::from(TuiSpan::styled(
+                                s.to_string(),
+                                Style::default().add_modifier(Modifier::DIM),
+                            ))
+                        })
+                        .collect(),
+                }
+            };
+            frame.render_widget(Paragraph::new(cover_lines), cell_chunks[0]);
+
+            let title_style = if is_selected {
+                Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default().add_modifier(Modifier::BOLD)
+            };
+            let title_truncated = truncate_to_width(&entry.title, COVER_THUMBNAIL_WIDTH as usize);
+            let author_truncated = truncate_to_width(&entry.author, COVER_THUMBNAIL_WIDTH as usize);
+            let title_lines = vec![
+                Line::from(TuiSpan::styled(title_truncated, title_style)),
+                Line::from(TuiSpan::styled(
+                    author_truncated,
+                    Style::default().add_modifier(Modifier::DIM),
+                )),
+            ];
+            frame.render_widget(Paragraph::new(title_lines), cell_chunks[1]);
         }
     }
 
-    // Render each visible cell.
-    for (offset, abs_idx) in (first_idx..last_idx).enumerate() {
-        let Some(cell_rect) = cell_rects.get(offset) else { break; };
-        let entry = &input.entries[abs_idx];
-        let is_selected = abs_idx == input.selection;
+    render_library_footer(
+        frame,
+        outer[2],
+        FooterInput {
+            mode: input.search_mode,
+            query: input.search_query,
+            matches: input.display_indices.len(),
+            warning: input.warning,
+            default_hint: " Enter open · ↑↓ navigate · / search · g list · q quit ",
+        },
+    );
+}
 
-        let border_style = if is_selected {
-            Style::default().fg(ratatui::style::Color::Yellow)
-        } else {
-            Style::default()
+/// Inputs for the library footer renderer. Used by both list and grid
+/// modes; the only difference between them is the default-hint string.
+struct FooterInput<'a> {
+    mode: crate::search::SearchMode,
+    query: Option<&'a str>,
+    matches: usize,
+    warning: Option<&'a str>,
+    default_hint: &'a str,
+}
+
+/// Render the library footer. Priority: search box (if mode != Idle),
+/// warning banner (if set), default hint.
+fn render_library_footer(frame: &mut Frame, area: Rect, input: FooterInput<'_>) {
+    use crate::search::SearchMode;
+    if !matches!(input.mode, SearchMode::Idle) {
+        let query = input.query.unwrap_or("");
+        let cursor = if matches!(input.mode, SearchMode::Editing) { "_" } else { "" };
+        let hint = match input.mode {
+            SearchMode::Editing => "Enter apply · Esc cancel",
+            SearchMode::Applied => "/ refine · Esc clear",
+            SearchMode::Idle => "",
         };
-        let block = TuiBlock::default()
-            .borders(Borders::ALL)
-            .border_style(border_style);
-
-        // Render the outer block, then render inner content into the inner rect.
-        let inner = block.inner(*cell_rect);
-        frame.render_widget(block, *cell_rect);
-
-        // Split inner into cover region (top 12 rows) + title region (rest).
-        let cell_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(COVER_THUMBNAIL_HEIGHT),
-                Constraint::Min(1),
-            ])
-            .split(inner);
-
-        // Cover: real if Ready, else placeholder.
-        let cover_lines: Vec<Line<'static>> = {
-            let cached = input
-                .book_ids
-                .get(abs_idx)
-                .and_then(|opt| opt.as_ref())
-                .and_then(|id| input.cover_cache.and_then(|c| c.get(id)));
-            match cached {
-                Some(lines) => lines
-                    .iter()
-                    .take(COVER_THUMBNAIL_HEIGHT as usize)
-                    .map(|l| Line::from(l.clone()))
-                    .collect(),
-                None => PLACEHOLDER
-                    .iter()
-                    .map(|s| {
-                        Line::from(TuiSpan::styled(
-                            s.to_string(),
-                            Style::default().add_modifier(Modifier::DIM),
-                        ))
-                    })
-                    .collect(),
-            }
-        };
-        frame.render_widget(Paragraph::new(cover_lines), cell_chunks[0]);
-
-        // Title region: title (bold, possibly REVERSED), author (DIM).
-        let title_style = if is_selected {
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default().add_modifier(Modifier::BOLD)
-        };
-        let title_truncated = truncate_to_width(&entry.title, COVER_THUMBNAIL_WIDTH as usize);
-        let author_truncated = truncate_to_width(&entry.author, COVER_THUMBNAIL_WIDTH as usize);
-        let title_lines = vec![
-            Line::from(TuiSpan::styled(title_truncated, title_style)),
-            Line::from(TuiSpan::styled(
-                author_truncated,
-                Style::default().add_modifier(Modifier::DIM),
-            )),
-        ];
-        frame.render_widget(Paragraph::new(title_lines), cell_chunks[1]);
+        let left = format!(" / {query}{cursor}");
+        let right = format!("{} matches · {hint} ", input.matches);
+        let total = left.chars().count() + right.chars().count();
+        let padding = (area.width as usize).saturating_sub(total);
+        let middle = " ".repeat(padding);
+        let line = Line::from(vec![
+            TuiSpan::styled(left, Style::default().add_modifier(Modifier::BOLD)),
+            TuiSpan::raw(middle),
+            TuiSpan::styled(right, Style::default().add_modifier(Modifier::DIM)),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
     }
 
-    // Footer.
     let footer_text = match input.warning {
         Some(msg) => format!(" ! {msg} ! "),
-        None => " Enter open · ↑↓ navigate · g list · q quit ".to_string(),
+        None => input.default_hint.to_string(),
     };
     let style = if input.warning.is_some() {
         Style::default().add_modifier(Modifier::REVERSED)
@@ -885,8 +954,27 @@ fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
     };
     frame.render_widget(
         Paragraph::new(Line::from(TuiSpan::styled(footer_text, style))),
-        outer[2],
+        area,
     );
+}
+
+/// Render a centered "no matches" message in the given area. Used by
+/// both list and grid renderers when a filter returns zero entries.
+fn render_no_matches(frame: &mut Frame, area: Rect) {
+    let msg = "no matches";
+    let line = Line::from(TuiSpan::styled(
+        msg,
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    let para = Paragraph::new(line).alignment(ratatui::layout::Alignment::Center);
+    let center_y = area.y + area.height / 2;
+    let centered = Rect {
+        x: area.x,
+        y: center_y,
+        width: area.width,
+        height: 1,
+    };
+    frame.render_widget(para, centered);
 }
 
 /// Truncate a string to fit within `max_cols` display columns. Uses
@@ -1622,6 +1710,9 @@ mod tests {
                 cover_cache: None,
                 book_ids: &[None],
                 warning: None,
+                display_indices: &[0],
+                search_query: None,
+                search_mode: crate::search::SearchMode::Idle,
             });
         }).unwrap();
     }
@@ -1641,6 +1732,7 @@ mod tests {
         let backend = TestBackend::new(4, 4);
         let mut term = Terminal::new(backend).unwrap();
         let entries = vec![lib_entry("A"), lib_entry("B")];
+        let display_indices: Vec<usize> = (0..entries.len()).collect();
         term.draw(|frame| {
             let area = frame.area();
             render_library(
@@ -1653,6 +1745,9 @@ mod tests {
                     cover_cache: None,
                     book_ids: &[None, None],
                     warning: None,
+                    display_indices: &display_indices,
+                    search_query: None,
+                    search_mode: crate::search::SearchMode::Idle,
                 },
             );
         })
@@ -1665,6 +1760,7 @@ mod tests {
         let mut term = Terminal::new(backend).unwrap();
         let entries: Vec<_> = (0..6).map(|i| lib_entry(&format!("Book{i}"))).collect();
         let book_ids: Vec<Option<BookId>> = (0..entries.len()).map(|_| None).collect();
+        let display_indices: Vec<usize> = (0..entries.len()).collect();
         term.draw(|frame| {
             let area = frame.area();
             render_library(
@@ -1677,6 +1773,9 @@ mod tests {
                     cover_cache: None,
                     book_ids: &book_ids,
                     warning: None,
+                    display_indices: &display_indices,
+                    search_query: None,
+                    search_mode: crate::search::SearchMode::Idle,
                 },
             );
         })
@@ -1702,6 +1801,7 @@ mod tests {
         let book_ids = vec![Some(id.clone())];
         let backend = TestBackend::new(80, 40);
         let mut term = Terminal::new(backend).unwrap();
+        let display_indices: Vec<usize> = (0..entries.len()).collect();
         term.draw(|frame| {
             let area = frame.area();
             render_library(
@@ -1714,6 +1814,9 @@ mod tests {
                     cover_cache: Some(&cache),
                     book_ids: &book_ids,
                     warning: None,
+                    display_indices: &display_indices,
+                    search_query: None,
+                    search_mode: crate::search::SearchMode::Idle,
                 },
             );
         })
@@ -1743,6 +1846,7 @@ mod tests {
         // footer for both render variants.
         let entries = vec![lib_entry("A")];
         let book_ids = vec![None];
+        let display_indices: Vec<usize> = (0..entries.len()).collect();
 
         for view_mode in [ViewMode::List, ViewMode::Grid] {
             let backend = TestBackend::new(80, 40);
@@ -1759,6 +1863,9 @@ mod tests {
                         cover_cache: None,
                         book_ids: &book_ids,
                         warning: Some("could not save prefs: oh no"),
+                        display_indices: &display_indices,
+                        search_query: None,
+                        search_mode: crate::search::SearchMode::Idle,
                     },
                 );
             })
@@ -1795,5 +1902,105 @@ mod tests {
         // selection=99 → page 16 → 96..100 (clamped to total)
         let r = visible_grid_range(80, 42, 100, 99).unwrap();
         assert_eq!(r, 96..100);
+    }
+
+    #[test]
+    fn search_footer_shows_query_and_cursor_in_editing() {
+        let backend = TestBackend::new(80, 40);
+        let mut term = Terminal::new(backend).unwrap();
+        let entries: Vec<_> = (0..3).map(|i| lib_entry(&format!("Book{i}"))).collect();
+        let book_ids: Vec<Option<BookId>> = (0..entries.len()).map(|_| None).collect();
+        let display_indices: Vec<usize> = vec![0, 1];  // pretend filter matches 2 of 3
+        term.draw(|frame| {
+            let area = frame.area();
+            render_library(
+                frame,
+                area,
+                LibraryRenderInput {
+                    entries: &entries,
+                    selection: 0,
+                    view_mode: ViewMode::Grid,
+                    cover_cache: None,
+                    book_ids: &book_ids,
+                    warning: None,
+                    display_indices: &display_indices,
+                    search_query: Some("book"),
+                    search_mode: crate::search::SearchMode::Editing,
+                },
+            );
+        })
+        .unwrap();
+        let buf: String = term.backend().buffer().content.iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(buf.contains("/ book"), "footer should show '/ book'");
+        assert!(buf.contains("2 matches"), "footer should show match count");
+        assert!(buf.contains("Enter apply"), "footer should show Editing hint");
+    }
+
+    #[test]
+    fn search_footer_shows_applied_hint() {
+        let backend = TestBackend::new(80, 40);
+        let mut term = Terminal::new(backend).unwrap();
+        let entries: Vec<_> = (0..3).map(|i| lib_entry(&format!("Book{i}"))).collect();
+        let book_ids: Vec<Option<BookId>> = (0..entries.len()).map(|_| None).collect();
+        let display_indices: Vec<usize> = vec![0, 1];
+        term.draw(|frame| {
+            let area = frame.area();
+            render_library(
+                frame,
+                area,
+                LibraryRenderInput {
+                    entries: &entries,
+                    selection: 0,
+                    view_mode: ViewMode::List,
+                    cover_cache: None,
+                    book_ids: &book_ids,
+                    warning: None,
+                    display_indices: &display_indices,
+                    search_query: Some("book"),
+                    search_mode: crate::search::SearchMode::Applied,
+                },
+            );
+        })
+        .unwrap();
+        let buf: String = term.backend().buffer().content.iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(buf.contains("/ refine"), "Applied footer should show '/ refine'");
+        assert!(buf.contains("Esc clear"), "Applied footer should show 'Esc clear'");
+    }
+
+    #[test]
+    fn no_matches_message_renders_when_filter_empty() {
+        let backend = TestBackend::new(80, 40);
+        let mut term = Terminal::new(backend).unwrap();
+        let entries: Vec<_> = (0..3).map(|i| lib_entry(&format!("Book{i}"))).collect();
+        let book_ids: Vec<Option<BookId>> = (0..entries.len()).map(|_| None).collect();
+        let display_indices: Vec<usize> = vec![];  // 0 matches
+        term.draw(|frame| {
+            let area = frame.area();
+            render_library(
+                frame,
+                area,
+                LibraryRenderInput {
+                    entries: &entries,
+                    selection: 0,
+                    view_mode: ViewMode::Grid,
+                    cover_cache: None,
+                    book_ids: &book_ids,
+                    warning: None,
+                    display_indices: &display_indices,
+                    search_query: Some("xyz"),
+                    search_mode: crate::search::SearchMode::Editing,
+                },
+            );
+        })
+        .unwrap();
+        let buf: String = term.backend().buffer().content.iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(buf.contains("no matches"), "should show 'no matches' message");
+        assert!(buf.contains("0 matches"), "footer should show '0 matches'");
     }
 }

@@ -279,6 +279,7 @@ fn library_grid_renders_without_panic_when_directory_has_epubs() {
     let book_ids_snapshot: Vec<Option<cleader::epub::BookId>> = (0..app.entries().len())
         .map(|i| app.book_id(i).cloned())
         .collect();
+    let display_indices: Vec<usize> = (0..app.entries().len()).collect();
     term.draw(|frame| {
         let area = frame.area();
         render_library(
@@ -291,6 +292,9 @@ fn library_grid_renders_without_panic_when_directory_has_epubs() {
                 cover_cache: app.cover_cache(),
                 book_ids: &book_ids_snapshot,
                 warning: None,
+                display_indices: &display_indices,
+                search_query: None,
+                search_mode: cleader::search::SearchMode::Idle,
             },
         );
     })

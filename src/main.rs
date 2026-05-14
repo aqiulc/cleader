@@ -247,6 +247,13 @@ fn library_event_loop(
             let view_mode = app.view_mode();
             let warning_owned = app.save_error().map(|s| s.to_string());
             let cover_cache = app.cover_cache();
+            let display_indices_owned: Vec<usize> = app.display_indices().to_vec();
+            let search_mode = app.search_mode();
+            let search_query_owned = if matches!(search_mode, cleader::search::SearchMode::Idle) {
+                None
+            } else {
+                Some(app.search_query().to_string())
+            };
 
             terminal.draw(|frame| {
                 let area = frame.area();
@@ -260,6 +267,9 @@ fn library_event_loop(
                         cover_cache,
                         book_ids: &book_ids_snapshot,
                         warning: warning_owned.as_deref(),
+                        display_indices: &display_indices_owned,
+                        search_query: search_query_owned.as_deref(),
+                        search_mode,
                     },
                 );
             })?;
