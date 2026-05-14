@@ -12,6 +12,7 @@ pub enum Action {
     ToggleHelp,
     ToggleToc,
     ToggleViewMode,
+    OpenSearch,
     Confirm,
     Quit,
     Resize(u16, u16),
@@ -56,6 +57,7 @@ fn translate_key(key: KeyEvent) -> Option<Action> {
 
         (Char('t'), false, false) => Some(Action::ToggleToc),
         (Char('g'), false, false) => Some(Action::ToggleViewMode),
+        (Char('/'), false, _) => Some(Action::OpenSearch),
         (Enter, _, _) => Some(Action::Confirm),
 
         _ => None,
@@ -163,6 +165,14 @@ mod tests {
         assert_eq!(
             translate(key(KeyCode::Char('g'))),
             Some(Action::ToggleViewMode)
+        );
+    }
+
+    #[test]
+    fn slash_opens_search() {
+        assert_eq!(
+            translate(key(KeyCode::Char('/'))),
+            Some(Action::OpenSearch)
         );
     }
 }

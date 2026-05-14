@@ -242,6 +242,10 @@ impl LibraryApp {
             Action::ToggleViewMode => {
                 self.toggle_view_mode();
             }
+            Action::OpenSearch => {
+                // Temporary no-op; Task 3 of v0.4.5 replaces this with
+                // the real handler that opens the search box.
+            }
             // Reader-only actions are no-ops in library mode.
             Action::ChapterNext
             | Action::ChapterPrev
