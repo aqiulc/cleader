@@ -238,7 +238,7 @@ fn library_event_loop(
                 display_len,
                 app.selection(),
             ) {
-                let display = app.display_indices().to_vec(); // snapshot
+                let display = app.display_indices().to_vec();
                 let entry_indices: Vec<usize> = range.map(|i| display[i]).collect();
                 app.request_visible_covers(entry_indices);
             }
@@ -290,10 +290,18 @@ fn library_event_loop(
             if app.is_searching() {
                 // In Editing state, route raw KeyEvents directly to the
                 // search handler — bypass translate() so every printable
-                // key is available as query input.
-                if let crossterm::event::Event::Key(key) = evt {
-                    app.handle_search_input(key);
-                    needs_redraw = true;
+                // key is available as query input. Resize events still
+                // need to update viewport_size, so handle them too.
+                match evt {
+                    crossterm::event::Event::Key(key) => {
+                        app.handle_search_input(key);
+                        needs_redraw = true;
+                    }
+                    crossterm::event::Event::Resize(cols, rows) => {
+                        app.handle(cleader::input::Action::Resize(cols, rows));
+                        needs_redraw = true;
+                    }
+                    _ => {}
                 }
             } else if let Some(action) = translate(evt) {
                 app.handle(action);
