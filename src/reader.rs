@@ -961,6 +961,10 @@ fn render_library_footer(frame: &mut Frame, area: Rect, input: FooterInput<'_>) 
 /// Render a centered "no matches" message in the given area. Used by
 /// both list and grid renderers when a filter returns zero entries.
 fn render_no_matches(frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        // Degenerate layout — no room to paint anything safely.
+        return;
+    }
     let msg = "no matches";
     let line = Line::from(TuiSpan::styled(
         msg,
@@ -1933,7 +1937,7 @@ mod tests {
         let buf: String = term.backend().buffer().content.iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(buf.contains("/ book"), "footer should show '/ book'");
+        assert!(buf.contains("/ book_"), "footer should show query with cursor underscore");
         assert!(buf.contains("2 matches"), "footer should show match count");
         assert!(buf.contains("Enter apply"), "footer should show Editing hint");
     }
@@ -1969,6 +1973,7 @@ mod tests {
             .collect();
         assert!(buf.contains("/ refine"), "Applied footer should show '/ refine'");
         assert!(buf.contains("Esc clear"), "Applied footer should show 'Esc clear'");
+        assert!(buf.contains("2 matches"), "Applied footer should show match count");
     }
 
     #[test]
