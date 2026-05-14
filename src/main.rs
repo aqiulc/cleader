@@ -222,34 +222,41 @@ fn library_event_loop(
             .map(|c| c.drain_finished())
             .unwrap_or(false);
 
-        // Ask the cache to start generating covers for visible cells.
+        // Ask the cache to start generating covers for visible cells,
+        // mapped through display_indices so a search filter narrows
+        // the request set.
         if matches!(app.view_mode(), cleader::prefs::ViewMode::Grid) {
             let (term_w, term_h) = terminal
                 .size()
                 .map(|s| (s.width, s.height))
                 .unwrap_or((80, 24));
             let grid_h = term_h.saturating_sub(2);
+            let display_len = app.display_indices().len();
             if let Some(range) = cleader::reader::visible_grid_range(
                 term_w,
                 grid_h,
-                app.entries().len(),
+                display_len,
                 app.selection(),
             ) {
-                app.request_visible_covers(range);
+                let display = app.display_indices().to_vec(); // snapshot
+                let entry_indices: Vec<usize> = range.map(|i| display[i]).collect();
+                app.request_visible_covers(entry_indices);
             }
         }
 
         if needs_redraw || had_new_covers {
-            // Snapshot fields for the draw closure.
             let entries_snapshot: Vec<_> = app.entries().to_vec();
-            let book_ids_snapshot: Vec<Option<cleader::epub::BookId>> = app.book_ids().to_vec();
+            let book_ids_snapshot = app.book_ids().to_vec();
+            let display_indices_snapshot: Vec<usize> = app.display_indices().to_vec();
             let selection = app.selection();
             let view_mode = app.view_mode();
             let warning_owned = app.save_error().map(|s| s.to_string());
             let cover_cache = app.cover_cache();
-            let display_indices_owned: Vec<usize> = app.display_indices().to_vec();
             let search_mode = app.search_mode();
-            let search_query_owned = if matches!(search_mode, cleader::search::SearchMode::Idle) {
+            let search_query_owned: Option<String> = if matches!(
+                search_mode,
+                cleader::search::SearchMode::Idle
+            ) {
                 None
             } else {
                 Some(app.search_query().to_string())
@@ -267,7 +274,7 @@ fn library_event_loop(
                         cover_cache,
                         book_ids: &book_ids_snapshot,
                         warning: warning_owned.as_deref(),
-                        display_indices: &display_indices_owned,
+                        display_indices: &display_indices_snapshot,
                         search_query: search_query_owned.as_deref(),
                         search_mode,
                     },
@@ -280,7 +287,15 @@ fn library_event_loop(
         // back so we can drain newly-finished covers.
         if event::poll(std::time::Duration::from_millis(50))? {
             let evt = event::read()?;
-            if let Some(action) = translate(evt) {
+            if app.is_searching() {
+                // In Editing state, route raw KeyEvents directly to the
+                // search handler — bypass translate() so every printable
+                // key is available as query input.
+                if let crossterm::event::Event::Key(key) = evt {
+                    app.handle_search_input(key);
+                    needs_redraw = true;
+                }
+            } else if let Some(action) = translate(evt) {
                 app.handle(action);
                 needs_redraw = true;
             }
