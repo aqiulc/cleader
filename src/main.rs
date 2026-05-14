@@ -232,7 +232,7 @@ fn library_event_loop(
                 .unwrap_or((80, 24));
             let grid_h = term_h.saturating_sub(2);
             let display_len = app.display_indices().len();
-            if let Some(range) = cleader::reader::visible_grid_range(
+            if let Some(range) = cleader::render_library::visible_grid_range(
                 term_w,
                 grid_h,
                 display_len,
@@ -264,10 +264,10 @@ fn library_event_loop(
 
             terminal.draw(|frame| {
                 let area = frame.area();
-                cleader::reader::render_library(
+                cleader::render_library::render_library(
                     frame,
                     area,
-                    cleader::reader::LibraryRenderInput {
+                    cleader::render_library::LibraryRenderInput {
                         entries: &entries_snapshot,
                         selection,
                         view_mode,

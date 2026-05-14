@@ -324,7 +324,7 @@ impl LibraryApp {
     /// in list mode or when the terminal is too narrow for a single
     /// grid cell (in which case grid mode falls back to list anyway).
     fn grid_cols(&self) -> usize {
-        let cell_width = crate::reader::CELL_WIDTH as usize;
+        let cell_width = crate::render_library::CELL_WIDTH as usize;
         (self.viewport_size.0 as usize / cell_width).max(1)
     }
 

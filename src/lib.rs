@@ -9,4 +9,5 @@ pub mod library_app;
 pub mod persistence;
 pub mod prefs;
 pub mod reader;
+pub mod render_library;
 pub mod search;

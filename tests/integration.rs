@@ -243,7 +243,7 @@ fn library_grid_renders_without_panic_when_directory_has_epubs() {
     use cleader::library::scan_directory;
     use cleader::library_app::LibraryApp;
     use cleader::prefs::{PrefsStore, ViewMode};
-    use cleader::reader::{render_library, LibraryRenderInput};
+    use cleader::render_library::{render_library, LibraryRenderInput};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
