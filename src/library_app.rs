@@ -379,6 +379,10 @@ impl LibraryApp {
                 }
             }
             Action::Quit => {
+                // In Applied state, Esc clears the filter rather than
+                // quitting (two-Esc pattern: first Esc closes the filter,
+                // a second Esc actually quits the library). This matches
+                // the modal-overlay convention used elsewhere in cleader.
                 if matches!(self.search.mode, SearchMode::Applied) {
                     self.clear_search();
                 } else {
@@ -412,6 +416,7 @@ impl LibraryApp {
 mod tests {
     use super::*;
     use crate::search::SearchMode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use std::path::Path;
 
     fn entry(title: &str) -> LibraryEntry {
@@ -419,6 +424,32 @@ mod tests {
             path: PathBuf::from(format!("/{title}.epub")),
             title: title.to_string(),
             author: "Anon".to_string(),
+        }
+    }
+
+    fn search_entry(title: &str, author: &str) -> LibraryEntry {
+        LibraryEntry {
+            path: PathBuf::from(format!("/{title}.epub")),
+            title: title.to_string(),
+            author: author.to_string(),
+        }
+    }
+
+    fn key_press(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn ctrl_c_key() -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
         }
     }
 
@@ -767,34 +798,6 @@ mod tests {
         // pre_search_selection or reset query (idempotent re-open).
         app.handle(Action::OpenSearch);
         assert_eq!(app.search_mode(), SearchMode::Editing);
-    }
-
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-
-    fn key_press(code: KeyCode) -> KeyEvent {
-        KeyEvent {
-            code,
-            modifiers: KeyModifiers::NONE,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        }
-    }
-
-    fn ctrl_c_key() -> KeyEvent {
-        KeyEvent {
-            code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::CONTROL,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        }
-    }
-
-    fn search_entry(title: &str, author: &str) -> LibraryEntry {
-        LibraryEntry {
-            path: PathBuf::from(format!("/{title}.epub")),
-            title: title.to_string(),
-            author: author.to_string(),
-        }
     }
 
     #[test]
