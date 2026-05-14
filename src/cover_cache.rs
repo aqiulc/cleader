@@ -209,6 +209,14 @@ impl CoverCache {
         }
     }
 
+    /// True if any cover in the memory map is still in the Pending
+    /// state (the worker is rendering it). Used by the event loop to
+    /// decide whether to use the short (50ms) poll cadence or relax
+    /// to the long (500ms) idle cadence.
+    pub fn has_pending(&self) -> bool {
+        self.memory.values().any(|s| matches!(s, CoverState::Pending))
+    }
+
     /// Pull any finished covers from the worker into the memory map.
     /// Returns true if at least one cover arrived (caller redraws).
     pub fn drain_finished(&mut self) -> bool {
@@ -520,5 +528,34 @@ mod tests {
                 "default_cache_dir should be .../covers/v5, got {s}"
             );
         }
+    }
+
+    #[test]
+    fn has_pending_false_for_empty_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CoverCache::open_at(dir.path().to_path_buf());
+        assert!(!cache.has_pending());
+    }
+
+    #[test]
+    fn has_pending_true_after_enqueue_then_false_after_drain() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = CoverCache::open_at(dir.path().to_path_buf());
+        let id = book_id(b"pending-test");
+        cache.enqueue(id.clone(), PathBuf::from("/no/such/book.epub"));
+        // Immediately after enqueue, the entry is Pending in memory.
+        // (The worker hasn't replied yet — the placeholder fallback
+        // takes a few ms to arrive.)
+        assert!(cache.has_pending(), "Pending immediately after enqueue");
+
+        // Wait for the worker to deliver the placeholder.
+        for _ in 0..50 {
+            cache.drain_finished();
+            if !cache.has_pending() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!cache.has_pending(), "no longer Pending after drain");
     }
 }

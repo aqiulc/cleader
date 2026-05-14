@@ -260,30 +260,36 @@ fn library_event_loop(
             }
         }
 
+        // Compute marquee offset for the currently-selected cell
+        // from the shared overflow value computed at the top of the
+        // loop body. This is a usize (Copy), so the borrow of app
+        // ends before the snapshot block below starts.
+        let marquee_offset_val: usize =
+            cleader::library_app::marquee_offset(app.marquee_elapsed_ms(), selected_overflow);
+
         if needs_redraw || had_new_covers {
-            let entries_snapshot: Vec<_> = app.entries().to_vec();
-            let book_ids_snapshot = app.book_ids().to_vec();
-            let display_indices_snapshot: Vec<usize> = app.display_indices().to_vec();
+            // Bind shared borrows of app fields into local refs. The
+            // draw closure captures these by reference; ratatui's
+            // terminal.draw takes FnOnce, so the borrows live for
+            // exactly one frame. Plain primitives (selection,
+            // view_mode, search_mode, show_help) are Copy.
+            let entries = app.entries();
+            let book_ids = app.book_ids();
+            let display_indices = app.display_indices();
+            let cover_cache = app.cover_cache();
+            let warning = app.save_error();
             let selection = app.selection();
             let view_mode = app.view_mode();
-            let warning_owned = app.save_error().map(|s| s.to_string());
-            let cover_cache = app.cover_cache();
             let search_mode = app.search_mode();
-            let search_query_owned: Option<String> = if matches!(
+            let show_help = app.show_help();
+            let search_query: Option<&str> = if matches!(
                 search_mode,
                 cleader::search::SearchMode::Idle
             ) {
                 None
             } else {
-                Some(app.search_query().to_string())
+                Some(app.search_query())
             };
-
-            // Compute marquee offset for the currently-selected cell
-            // from the shared overflow value computed at the top of the
-            // loop body.
-            let marquee_offset_val: usize =
-                cleader::library_app::marquee_offset(app.marquee_elapsed_ms(), selected_overflow);
-            let show_help = app.show_help();
 
             terminal.draw(|frame| {
                 let area = frame.area();
@@ -291,14 +297,14 @@ fn library_event_loop(
                     frame,
                     area,
                     cleader::render_library::LibraryRenderInput {
-                        entries: &entries_snapshot,
+                        entries,
                         selection,
                         view_mode,
                         cover_cache,
-                        book_ids: &book_ids_snapshot,
-                        warning: warning_owned.as_deref(),
-                        display_indices: &display_indices_snapshot,
-                        search_query: search_query_owned.as_deref(),
+                        book_ids,
+                        warning,
+                        display_indices,
+                        search_query,
                         search_mode,
                         marquee_offset: marquee_offset_val,
                         show_help,
@@ -308,15 +314,29 @@ fn library_event_loop(
             needs_redraw = false;
         }
 
-        // Poll for input with a 50ms timeout. If nothing arrives, loop
-        // back so we can drain newly-finished covers.
-        if event::poll(std::time::Duration::from_millis(50))? {
+        // Compute idle predicate: truly idle means no animation
+        // (marquee inactive), no background work (no pending covers),
+        // no modal state (no search, no help). When truly idle, relax
+        // the poll cadence from 50ms (20Hz) to 500ms (2Hz).
+        let has_pending_covers = app
+            .cover_cache()
+            .map(|c| c.has_pending())
+            .unwrap_or(false);
+        let is_idle = selected_overflow == 0
+            && !has_pending_covers
+            && matches!(app.search_mode(), cleader::search::SearchMode::Idle)
+            && !app.show_help();
+        let poll_timeout = if is_idle {
+            std::time::Duration::from_millis(500)
+        } else {
+            std::time::Duration::from_millis(50)
+        };
+
+        // Poll for input with the adaptive timeout. If nothing arrives,
+        // loop back so we can drain newly-finished covers.
+        if event::poll(poll_timeout)? {
             let evt = event::read()?;
             if app.is_searching() {
-                // In Editing state, route raw KeyEvents directly to the
-                // search handler — bypass translate() so every printable
-                // key is available as query input. Resize events still
-                // need to update viewport_size, so handle them too.
                 match evt {
                     crossterm::event::Event::Key(key) => {
                         app.handle_search_input(key);
