@@ -24,11 +24,12 @@ The `cleader` binary lands in `~/.cargo/bin/`. Make sure that's on your `$PATH`.
 |---|---|
 | Linux x86_64 | `cleader-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux ARM64 (Raspberry Pi, Graviton) | `cleader-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS Intel | `cleader-x86_64-apple-darwin.tar.gz` |
-| macOS Apple Silicon | `cleader-aarch64-apple-darwin.tar.gz` |
+| macOS Apple Silicon (M1/M2/M3/M4) | `cleader-aarch64-apple-darwin.tar.gz` |
 | Windows x86_64 | `cleader-x86_64-pc-windows-msvc.zip` |
 
-Extract and move the `cleader` binary somewhere on your `$PATH`.
+Extract and move the `cleader` binary somewhere on your `$PATH`. Intel
+Mac users — `cargo install cleader` works; a prebuilt Intel binary
+will land in a follow-up release.
 
 **From source:**
 
