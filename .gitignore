@@ -6,5 +6,10 @@ covers/
 .DS_Store
 .idea/
 .vscode/
+.claude/
 *.swp
 *.tmp
+
+# Development planning docs — kept locally, not published with the
+# released crate (see CONTRIBUTING.md for the workflow that uses them).
+docs/

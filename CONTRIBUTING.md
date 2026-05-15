@@ -14,12 +14,12 @@ cargo run -- path/to/book.epub              # manual smoke
 
 ## Design + plan workflow
 
-Larger work goes through a design → plan → implementation cycle:
-
-- **`docs/superpowers/specs/`** — design docs (one per feature, dated).
-  Architecture, state machines, non-goals, error handling.
-- **`docs/superpowers/plans/`** — implementation plans (one per feature,
-  dated). Bite-sized tasks, each with code + commit message.
+Larger changes benefit from a brief design write-up before code lands —
+architecture, state machine, non-goals, error handling — followed by an
+implementation plan broken into bite-sized commits. A draft pasted into
+the PR description is usually enough; the maintainer keeps long-form
+versions in a local working directory rather than the repo so the
+published crate stays focused on shipped code.
 
 For small fixes or polish, a focused PR is fine.
 
