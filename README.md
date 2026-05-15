@@ -9,21 +9,34 @@ directory; remembers where you left off; never gets in your way.
 
 ## Install
 
-Until cleader hits the package managers, install from source:
+**With Rust:**
 
 ```bash
-cargo install --path .   # from a local clone
+cargo install cleader
 ```
 
-Or directly:
+The `cleader` binary lands in `~/.cargo/bin/`. Make sure that's on your `$PATH`.
+
+**Prebuilt binaries** (no Rust required) — download from the latest
+[GitHub Release](https://github.com/aqiulc/cleader/releases/latest):
+
+| Platform | Asset |
+|---|---|
+| Linux x86_64 | `cleader-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 (Raspberry Pi, Graviton) | `cleader-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Intel | `cleader-x86_64-apple-darwin.tar.gz` |
+| macOS Apple Silicon | `cleader-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `cleader-x86_64-pc-windows-msvc.zip` |
+
+Extract and move the `cleader` binary somewhere on your `$PATH`.
+
+**From source:**
 
 ```bash
 git clone https://github.com/aqiulc/cleader
 cd cleader
 cargo install --path .
 ```
-
-The `cleader` binary lands in `~/.cargo/bin/`. Make sure that's on your `$PATH`.
 
 ## Usage
 
