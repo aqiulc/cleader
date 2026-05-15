@@ -9,7 +9,15 @@ directory; remembers where you left off; never gets in your way.
 
 ## Install
 
-**With Rust:**
+**Homebrew (macOS, Linux):**
+
+```bash
+brew install aqiulc/cleader/cleader
+```
+
+Or `brew tap aqiulc/cleader` once, then `brew install cleader`.
+
+**With Rust (any platform):**
 
 ```bash
 cargo install cleader
