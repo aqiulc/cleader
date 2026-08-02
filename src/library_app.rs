@@ -9,10 +9,11 @@
 use crate::cover_cache::CoverCache;
 use crate::epub::BookId;
 use crate::input::Action;
-use crate::library::LibraryEntry;
+use crate::library::{LibraryEntry, LibraryScanner};
 use crate::prefs::{PrefsStore, ViewMode};
 use crate::search::{filter_indices, SearchMode, SearchState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -92,37 +93,31 @@ pub struct LibraryApp {
     /// cleared by the same action or by `Action::Quit` (so Esc dismisses
     /// the overlay rather than quitting the library).
     show_help: bool,
-    /// Root directory this library was launched with. `None` when the
-    /// app was constructed with pre-built entries (tests, internal
-    /// tooling) — in that case the scan can't be deepened and
-    /// `expand_scan_depth` is a no-op.
-    scan_root: Option<PathBuf>,
-    /// Current scan depth: 0 = the root directory only, N = N levels of
-    /// subdirectories, `usize::MAX` = fully recursive. Only meaningful
-    /// when `scan_root` is `Some`.
-    scan_depth: usize,
+    /// Incremental directory scanner, `Some` when the app owns a scan
+    /// root. `None` for apps built from pre-built entries (tests,
+    /// internal tooling) — in that case the scan can't be deepened and
+    /// `expand_scan_depth` is a no-op. The scanner remembers the
+    /// directories it has *not* descended into yet, so each expand
+    /// walks only new folders and never re-reads metadata for books it
+    /// has already seen.
+    scanner: Option<LibraryScanner>,
 }
 
 impl LibraryApp {
     /// Production constructor: opens PrefsStore and CoverCache from the
     /// OS data dir. Falls back to disabled cache (grid view degrades to
     /// list) if the OS data dir is unavailable. Prefs failure falls back
-    /// to default (ViewMode::Grid). `root` is the directory the library
-    /// was scanned from and `depth` the initial scan depth — both feed
-    /// the `ExpandScanDepth` action (see `expand_scan_depth`).
-    pub fn new(
-        entries: Vec<LibraryEntry>,
-        viewport: (u16, u16),
-        root: Option<PathBuf>,
-        depth: usize,
-    ) -> Self {
-        Self::new_full(
+    /// to default (ViewMode::Grid). `scanner` is the incremental scan
+    /// over the library root; its frontier and depth feed the
+    /// `ExpandScanDepth` action (see `expand_scan_depth`).
+    pub fn new(scanner: LibraryScanner, viewport: (u16, u16)) -> Self {
+        let entries = scanner.entries().to_vec();
+        Self::with_entries(
             entries,
             viewport,
             PrefsStore::open().ok(),
             CoverCache::open(),
-            root,
-            depth,
+            Some(scanner),
         )
     }
 
@@ -136,16 +131,15 @@ impl LibraryApp {
         prefs: Option<PrefsStore>,
         cover_cache: Option<CoverCache>,
     ) -> Self {
-        Self::new_full(entries, viewport, prefs, cover_cache, None, 0)
+        Self::with_entries(entries, viewport, prefs, cover_cache, None)
     }
 
-    fn new_full(
+    fn with_entries(
         entries: Vec<LibraryEntry>,
         viewport: (u16, u16),
         prefs: Option<PrefsStore>,
         cover_cache: Option<CoverCache>,
-        scan_root: Option<PathBuf>,
-        scan_depth: usize,
+        scanner: Option<LibraryScanner>,
     ) -> Self {
         let view_mode = prefs
             .as_ref()
@@ -174,8 +168,7 @@ impl LibraryApp {
             pre_search_selection: 0,
             marquee_start: Some(Instant::now()),
             show_help: false,
-            scan_root,
-            scan_depth,
+            scanner,
         }
     }
 
@@ -252,33 +245,35 @@ impl LibraryApp {
     /// Root directory this library was scanned from, if any. `None` for
     /// app instances built with pre-built entries.
     pub fn scan_root(&self) -> Option<&Path> {
-        self.scan_root.as_deref()
+        self.scanner.as_ref().map(|s| s.root())
     }
 
     /// Current scan depth (0 = root only, `usize::MAX` = fully
     /// recursive). `None` when the app has no scan root, meaning depth
     /// can't be expanded.
     pub fn scan_depth(&self) -> Option<usize> {
-        self.scan_root.as_ref().map(|_| self.scan_depth)
+        self.scanner.as_ref().map(|s| s.depth())
     }
 
-    /// Rescan the root at one deeper level and swap in the results.
-    /// Preserves the currently-selected book (matched by path) so the
-    /// cursor doesn't jump after expanding. No-op when there is no scan
-    /// root or the scan is already fully recursive.
+    /// Rescan one level deeper and swap in the results. Only the
+    /// directories the scanner hasn't explored yet are walked, so
+    /// already-known books are never re-opened. Preserves the
+    /// currently-selected book (matched by path) so the cursor doesn't
+    /// jump after expanding. No-op when there is no scan root or the
+    /// scan is already fully recursive.
     pub fn expand_scan_depth(&mut self) {
-        let Some(root) = self.scan_root.clone() else {
+        let Some(scanner) = self.scanner.as_mut() else {
             return;
         };
-        if self.scan_depth == usize::MAX {
+        if scanner.depth() == usize::MAX {
             return;
         }
-        let new_depth = self.scan_depth.saturating_add(1);
         let selected_path = self.entries.get(self.selection).map(|e| e.path.clone());
-        match crate::library::scan_directory_at_depth(&root, new_depth) {
+        let expanded: std::io::Result<Vec<LibraryEntry>> =
+            scanner.expand().map(|()| scanner.entries().to_vec());
+        match expanded {
             Ok(entries) => {
                 self.replace_entries(entries);
-                self.scan_depth = new_depth;
                 if let Some(path) = selected_path {
                     if let Some(idx) = self.entries.iter().position(|e| e.path == path) {
                         self.selection = idx;
@@ -291,10 +286,23 @@ impl LibraryApp {
     }
 
     /// Replace the entry list and every structure parallel to it, then
-    /// clamp the selection to the new bounds.
+    /// clamp the selection to the new bounds. BookIds already computed
+    /// for unchanged entries (matched by path) are carried over, so an
+    /// expand doesn't re-hash or re-request covers for books that were
+    /// already in the list.
     fn replace_entries(&mut self, entries: Vec<LibraryEntry>) {
+        let mut book_ids_by_path: HashMap<PathBuf, BookId> = self
+            .book_ids
+            .iter()
+            .zip(&self.entries)
+            .filter_map(|(id, e)| id.as_ref().map(|id| (e.path.clone(), id.clone())))
+            .collect();
         self.entries = entries;
-        self.book_ids = vec![None; self.entries.len()];
+        self.book_ids = self
+            .entries
+            .iter()
+            .map(|e| book_ids_by_path.remove(&e.path))
+            .collect();
         self.entries_lowercased = self
             .entries
             .iter()
@@ -1309,15 +1317,9 @@ mod tests {
     }
 
     fn app_with_root(root: &Path) -> LibraryApp {
-        let entries = crate::library::scan_directory_at_depth(root, 0).unwrap();
-        LibraryApp::new_full(
-            entries,
-            (80, 24),
-            None,
-            None,
-            Some(root.to_path_buf()),
-            0,
-        )
+        let scanner = crate::library::LibraryScanner::new(root).unwrap();
+        let entries = scanner.entries().to_vec();
+        LibraryApp::with_entries(entries, (80, 24), None, None, Some(scanner))
     }
 
     #[test]
@@ -1380,15 +1382,9 @@ mod tests {
     fn expand_scan_depth_is_noop_when_fully_recursive() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("top.epub"), "x").unwrap();
-        let entries = crate::library::scan_directory_at_depth(dir.path(), usize::MAX).unwrap();
-        let mut app = LibraryApp::new_full(
-            entries,
-            (80, 24),
-            None,
-            None,
-            Some(dir.path().to_path_buf()),
-            usize::MAX,
-        );
+        let scanner = crate::library::LibraryScanner::at_depth(dir.path(), usize::MAX).unwrap();
+        let entries = scanner.entries().to_vec();
+        let mut app = LibraryApp::with_entries(entries, (80, 24), None, None, Some(scanner));
         assert_eq!(app.scan_depth(), Some(usize::MAX));
         app.handle(Action::ExpandScanDepth);
         assert_eq!(app.scan_depth(), Some(usize::MAX));
@@ -1413,6 +1409,39 @@ mod tests {
             app.display_indices().len(),
             1,
             "active filter should re-run against the expanded entries"
+        );
+    }
+
+    #[test]
+    fn expand_preserves_computed_book_ids_by_path() {
+        // An already-computed BookId must survive an expand so covers
+        // for known books aren't re-hashed / re-requested. New entries
+        // come in with no cached id.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("top.epub"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/nested.epub"), "x").unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache = crate::cover_cache::CoverCache::open_at(cache_dir.path().to_path_buf());
+        let scanner = crate::library::LibraryScanner::new(dir.path()).unwrap();
+        let entries = scanner.entries().to_vec();
+        let mut app = LibraryApp::with_entries(entries, (80, 24), None, Some(cache), Some(scanner));
+
+        app.request_visible_covers(0..1);
+        let before = app.book_id(0).cloned();
+        assert!(before.is_some(), "root entry should resolve a book_id");
+
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(app.entries().len(), 2, "expand added the nested book");
+        // entries are re-sorted by title: ["nested", "top"].
+        assert_eq!(
+            app.book_id(1).cloned(),
+            before,
+            "the previously-seen book keeps its cached book_id"
+        );
+        assert!(
+            app.book_id(0).is_none(),
+            "the newly added book has no cached book_id yet"
         );
     }
 }

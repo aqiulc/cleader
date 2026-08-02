@@ -85,14 +85,13 @@ fn run_library_session(
     dir: &std::path::Path,
     max_body_width: u16,
 ) -> anyhow::Result<()> {
-    let entries = cleader::library::scan_directory_at_depth(dir, 0)?;
+    let scanner = cleader::library::LibraryScanner::new(dir)?;
     // An empty scan is not an error: the library opens with a hint to
     // expand the scan into subdirectories (see `e` expand in the UI).
 
     let mut terminal = setup_terminal()?;
     let viewport = terminal.size().map(|s| (s.width, s.height))?;
-    let mut library_app =
-        cleader::library_app::LibraryApp::new(entries, viewport, Some(dir.to_path_buf()), 0);
+    let mut library_app = cleader::library_app::LibraryApp::new(scanner, viewport);
 
     let outcome: anyhow::Result<()> = loop {
         // Run library until selection or quit.
