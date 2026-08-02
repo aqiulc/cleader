@@ -12,7 +12,7 @@ use crate::input::Action;
 use crate::library::LibraryEntry;
 use crate::prefs::{PrefsStore, ViewMode};
 use crate::search::{filter_indices, SearchMode, SearchState};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -303,6 +303,13 @@ impl LibraryApp {
     /// routes raw KeyEvents here; this bypasses translate() so every
     /// printable key is available as query input.
     pub fn handle_search_input(&mut self, key: KeyEvent) {
+        // Mirror input.rs: the Windows console delivers both a Press and
+        // a Release event per physical key. Search editing consumes raw
+        // KeyEvents (bypassing translate()), so it must ignore releases
+        // itself or every typed char / Backspace would apply twice.
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
         match key.code {
             KeyCode::Enter => {
                 self.search.mode = SearchMode::Applied;
@@ -534,6 +541,41 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
+    }
+
+    fn key_release(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn release_events_do_not_modify_search() {
+        // Windows delivers a Release event after every Press; search
+        // editing consumes raw KeyEvents, so releases must be ignored
+        // or chars/Backspace would double-apply.
+        let mut app = LibraryApp::new_with(
+            vec![search_entry("Frankenstein", "A")],
+            (80, 24),
+            None,
+            None,
+        );
+        app.handle(Action::OpenSearch);
+        app.handle_search_input(key_release(KeyCode::Char('f')));
+        assert_eq!(app.search_query(), "", "Release must not append a char");
+        app.handle_search_input(key_press(KeyCode::Char('f')));
+        assert_eq!(app.search_query(), "f");
+        app.handle_search_input(key_release(KeyCode::Backspace));
+        assert_eq!(app.search_query(), "f", "Release must not delete a char");
+        app.handle_search_input(key_release(KeyCode::Enter));
+        assert_eq!(
+            app.search_mode(),
+            SearchMode::Editing,
+            "Release must not apply the search"
+        );
     }
 
     #[test]
