@@ -18,6 +18,12 @@ pub struct Position {
     pub author: String,
     pub chapter_idx: u32,
     pub line_offset: u32,
+    /// Source-character offset of the visible top line at save time.
+    /// Re-anchors the position correctly when the terminal width (and
+    /// therefore the wrap) differs at restore time. `None` for
+    /// positions written by cleader < 1.1 (fall back to `line_offset`).
+    #[serde(default)]
+    pub source_offset: Option<u32>,
     pub last_read: DateTime<Utc>,
 }
 
@@ -133,6 +139,7 @@ mod tests {
                 author: "Mary Shelley".into(),
                 chapter_idx: 4,
                 line_offset: 312,
+                source_offset: Some(1200),
                 last_read: DateTime::parse_from_rfc3339("2026-05-03T11:53:00Z")
                     .unwrap()
                     .with_timezone(&Utc),
@@ -141,6 +148,33 @@ mod tests {
         let json = serde_json::to_string(&reg).unwrap();
         let parsed: Registry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, reg);
+    }
+
+    #[test]
+    fn position_without_source_offset_defaults_to_none() {
+        // Registries written by cleader < 1.1 have no source_offset field.
+        // Missing field must deserialize as None (fall back to line_offset),
+        // not error.
+        let pos: Position = serde_json::from_str(
+            r#"{"title":"T","author":"A","chapter_idx":1,"line_offset":5,"last_read":"2026-05-03T11:53:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(pos.source_offset, None);
+    }
+
+    #[test]
+    fn position_with_source_offset_roundtrips() {
+        let pos = Position {
+            title: "T".into(),
+            author: "A".into(),
+            chapter_idx: 1,
+            line_offset: 5,
+            source_offset: Some(77),
+            last_read: Utc::now(),
+        };
+        let json = serde_json::to_string(&pos).unwrap();
+        let parsed: Position = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.source_offset, Some(77));
     }
 
     #[test]
@@ -216,6 +250,7 @@ mod tests {
                 author: "Y".into(),
                 chapter_idx: 2,
                 line_offset: 7,
+                source_offset: Some(30),
                 last_read: Utc::now(),
             },
         );
@@ -263,6 +298,7 @@ mod tests {
                     author: "A".into(),
                     chapter_idx: 3,
                     line_offset: 99,
+                    source_offset: Some(400),
                     last_read: Utc::now(),
                 },
             );
@@ -284,6 +320,7 @@ mod tests {
             author: "A".into(),
             chapter_idx: ch,
             line_offset: 0,
+            source_offset: None,
             last_read: Utc::now(),
         };
         p.upsert("/k".into(), make(1));

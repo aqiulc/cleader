@@ -93,17 +93,24 @@ impl App {
             }
         }
 
-        let (chapter_idx, line_offset) = match persistence.get(&key) {
+        let (chapter_idx, line_offset, source_offset) = match persistence.get(&key) {
             Some(p) if (p.chapter_idx as usize) < book.chapters.len() => {
-                (p.chapter_idx as usize, p.line_offset as usize)
+                (
+                    p.chapter_idx as usize,
+                    p.line_offset as usize,
+                    p.source_offset.map(|o| o as usize),
+                )
             }
-            _ => (0, 0),
+            _ => (0, 0, None),
         };
         let wrapped = wrap_chapter(
             &book.chapters[chapter_idx].blocks,
             body_text_width(viewport.0, max_body_width),
         );
-        let line_offset = line_offset.min(wrapped.len().saturating_sub(1));
+        let line_offset = match source_offset {
+            Some(src) => wrapped.find_line_for_source(src).unwrap_or(0),
+            None => line_offset.min(wrapped.len().saturating_sub(1)),
+        };
         Self {
             book,
             chapter_idx,
@@ -249,6 +256,11 @@ impl App {
             author: self.book.author.clone(),
             chapter_idx: self.chapter_idx as u32,
             line_offset: self.line_offset as u32,
+            // Persist the source-char offset of the visible top line, not
+            // just the raw wrapped-line index. The wrapped index depends
+            // on terminal width; the source offset re-anchors correctly
+            // across width changes on restore (see App::new).
+            source_offset: Some(self.wrapped_source_offset_at_top() as u32),
             last_read: Utc::now(),
         }
     }
@@ -586,6 +598,7 @@ mod tests {
                     author: "A".into(),
                     chapter_idx: 1,
                     line_offset: 0,
+                    source_offset: None,
                     last_read: Utc::now(),
                 },
             );
@@ -612,6 +625,7 @@ mod tests {
                     author: "A".into(),
                     chapter_idx: 1,
                     line_offset: 0,
+                    source_offset: None,
                     last_read: Utc::now(),
                 },
             );
@@ -639,6 +653,7 @@ mod tests {
                     author: "A".into(),
                     chapter_idx: 99,
                     line_offset: 50,
+                    source_offset: None,
                     last_read: Utc::now(),
                 },
             );
@@ -937,6 +952,7 @@ mod tests {
                     author: "A".into(),
                     chapter_idx: 1,
                     line_offset: 0,
+                    source_offset: None,
                     last_read: Utc::now(),
                 },
             );
@@ -980,6 +996,7 @@ mod tests {
                     author: "A".into(),
                     chapter_idx: 0,
                     line_offset: 9999,
+                    source_offset: None,
                     last_read: Utc::now(),
                 },
             );
@@ -991,6 +1008,7 @@ mod tests {
                     author: "A".into(),
                     chapter_idx: 2,
                     line_offset: 0,
+                    source_offset: None,
                     last_read: Utc::now(),
                 },
             );
@@ -1241,5 +1259,61 @@ mod tests {
             pre_source - post_source
         );
         assert_eq!(app.width_mode(), WidthMode::Full);
+    }
+
+    #[test]
+    fn save_writes_source_offset_for_reanchoring() {
+        // Saving must record the source-char offset of the visible top
+        // line alongside the raw wrapped-line index.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let book = book_with_chapters(vec![long_paragraph_block()]);
+        let key = book.registry_key();
+        let mut app = App::new(book, Persistence::open_at(path.clone()), (200, 40), TEST_WIDTH);
+        app.handle(Action::PageNext);
+        let expected = app.wrapped_source_offset_at_top();
+        assert!(expected > 0, "test needs a non-trivial scroll position");
+        app.handle(Action::Quit); // flushes the position
+        let reopened = Persistence::open_at(path);
+        let pos = reopened.get(&key).expect("position saved");
+        assert_eq!(pos.source_offset, Some(expected as u32));
+        assert!(pos.line_offset > 0);
+    }
+
+    #[test]
+    fn restore_reanchors_by_source_offset_across_widths() {
+        // Bug 4: the persisted wrapped-line index depends on terminal
+        // width. Save at 200 cols (wrap 77), restore at 40 cols (wrap
+        // 37): restore must re-anchor by the saved source offset instead
+        // of clamping the stale line index (which drifts by paragraphs).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let book = book_with_chapters(vec![long_paragraph_block()]);
+        let key = book.registry_key();
+
+        // Session 1: read mid-chapter at 200 cols.
+        {
+            let mut app =
+                App::new(book.clone(), Persistence::open_at(path.clone()), (200, 40), TEST_WIDTH);
+            app.handle(Action::PageNext);
+            app.handle(Action::Quit);
+        }
+
+        let saved_source = Persistence::open_at(path.clone())
+            .get(&key)
+            .and_then(|p| p.source_offset)
+            .expect("saved source offset") as usize;
+
+        // Session 2: reopen at a different width.
+        let app = App::new(book, Persistence::open_at(path), (40, 40), TEST_WIDTH);
+        let restored_source = app.wrapped_source_offset_at_top();
+        assert!(
+            restored_source <= saved_source,
+            "restore should land at or before the saved source ({restored_source} > {saved_source})"
+        );
+        assert!(
+            saved_source - restored_source < 100,
+            "restore drifted too far from the saved source ({saved_source} vs {restored_source})"
+        );
     }
 }
