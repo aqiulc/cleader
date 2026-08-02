@@ -485,7 +485,9 @@ impl LibraryApp {
             // Reader-only actions are no-ops in library mode.
             Action::ChapterNext
             | Action::ChapterPrev
-            | Action::ToggleToc => {}
+            | Action::ToggleToc
+            | Action::Undo
+            | Action::Redo => {}
         }
     }
 

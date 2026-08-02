@@ -9,6 +9,8 @@ pub enum Action {
     PagePrev,
     ChapterNext,
     ChapterPrev,
+    Undo,
+    Redo,
     ToggleHelp,
     ToggleToc,
     ToggleViewMode,
@@ -49,6 +51,9 @@ fn translate_key(key: KeyEvent) -> Option<Action> {
 
         (Char('n'), false, false) => Some(Action::ChapterNext),
         (Char('N'), false, _) => Some(Action::ChapterPrev),
+
+        (Char('u'), false, false) => Some(Action::Undo),
+        (Char('r'), false, false) => Some(Action::Redo),
 
         // ? maps to ToggleHelp regardless of the SHIFT modifier — US
         // layouts produce ? via Shift+/ (which arrives as Char('?')
@@ -116,6 +121,14 @@ mod tests {
         assert_eq!(translate(key(KeyCode::Char('n'))), Some(Action::ChapterNext));
         let shift_n = key_with(KeyCode::Char('N'), KeyModifiers::SHIFT);
         assert_eq!(translate(shift_n), Some(Action::ChapterPrev));
+    }
+
+    #[test]
+    fn undo_redo_keys_map_correctly() {
+        assert_eq!(translate(key(KeyCode::Char('u'))), Some(Action::Undo));
+        assert_eq!(translate(key(KeyCode::Char('r'))), Some(Action::Redo));
+        // Shift variants must not map (kept free for other uses).
+        assert_eq!(translate(key_with(KeyCode::Char('U'), KeyModifiers::SHIFT)), None);
     }
 
     #[test]

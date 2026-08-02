@@ -42,7 +42,19 @@ pub struct App {
     /// that re-wraps (load_chapter, resize) keep using the user's
     /// chosen value rather than reverting to the built-in default.
     max_body_width: u16,
+    /// Undo history for in-session cursor moves. Each entry is the
+    /// `(chapter_idx, line_offset)` the reader occupied BEFORE a
+    /// navigation action that changed position. Popped by `u`.
+    /// Oldest entries are evicted past `MAX_UNDO_HISTORY`.
+    undo_stack: Vec<(usize, usize)>,
+    /// Redo history, fed by undo and cleared by any fresh navigation.
+    /// Popped by `r`.
+    redo_stack: Vec<(usize, usize)>,
 }
+
+/// Maximum cursor positions retained in the undo history. Prevents
+/// unbounded memory growth from long reading sessions.
+const MAX_UNDO_HISTORY: usize = 100;
 
 impl App {
     pub fn new(
@@ -98,6 +110,8 @@ impl App {
             show_toc: false,
             toc_selection: 0,
             max_body_width,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -270,9 +284,11 @@ impl App {
                 }
                 Action::Quit => self.show_toc = false,
                 Action::Resize(w, h) => self.resize(w, h),
-                Action::ChapterNext | Action::ChapterPrev | Action::ToggleViewMode | Action::OpenSearch => {
+                Action::ChapterNext | Action::ChapterPrev | Action::ToggleViewMode | Action::OpenSearch | Action::Undo | Action::Redo => {
                     // Chapter nav while TOC is up is ambiguous — the user
                     // probably wanted TOC selection nav. Treat as no-op.
+                    // Undo/Redo would move the body under a modal overlay;
+                    // dismiss the TOC first, then undo.
                     // ToggleViewMode is always a no-op in reader mode (library-only action).
                     // OpenSearch is always a no-op in reader mode (library-only action).
                 }
@@ -299,6 +315,8 @@ impl App {
                 self.chapter_prev();
                 self.save();
             }
+            Action::Undo => self.undo(),
+            Action::Redo => self.redo(),
             Action::Resize(w, h) => self.resize(w, h),
             Action::ToggleHelp => {
                 self.show_help = !self.show_help;
@@ -349,39 +367,41 @@ impl App {
 
     fn toc_jump_to_selection(&mut self) {
         // Land at the start of the selected chapter.
+        let before = (self.chapter_idx, self.line_offset);
         if self.toc_selection != self.chapter_idx {
             self.load_chapter(self.toc_selection, 0);
             self.save();
         }
         self.show_toc = false;
+        self.record_move(before);
     }
 
     fn line_down(&mut self) {
+        let before = (self.chapter_idx, self.line_offset);
         if self.line_offset + 1 < self.wrapped.len() {
             self.line_offset += 1;
-            return;
-        }
-        // At end of current chapter; advance if possible.
-        if self.chapter_idx + 1 < self.book.chapters.len() {
+        } else if self.chapter_idx + 1 < self.book.chapters.len() {
+            // At end of current chapter; advance to the next.
             self.load_chapter(self.chapter_idx + 1, 0);
         }
         // Otherwise: no-op (last line of last chapter).
+        self.record_move(before);
     }
 
     fn line_up(&mut self) {
+        let before = (self.chapter_idx, self.line_offset);
         if self.line_offset > 0 {
             self.line_offset -= 1;
-            return;
-        }
-        // At start of chapter; go back if possible.
-        if self.chapter_idx > 0 {
+        } else if self.chapter_idx > 0 {
+            // At start of chapter; go back, landing on the last line.
             let prev = self.chapter_idx - 1;
-            // We'll set offset to last line after re-wrap.
             self.load_chapter(prev, usize::MAX);
         }
+        self.record_move(before);
     }
 
     fn page_next(&mut self) {
+        let before = (self.chapter_idx, self.line_offset);
         let step = self.lines_per_page();
         let new_offset = self.line_offset + step;
         if new_offset < self.wrapped.len() {
@@ -390,9 +410,11 @@ impl App {
             self.load_chapter(self.chapter_idx + 1, 0);
         }
         // Else: stay put — last page of last chapter.
+        self.record_move(before);
     }
 
     fn page_prev(&mut self) {
+        let before = (self.chapter_idx, self.line_offset);
         let step = self.lines_per_page();
         if self.line_offset >= step {
             self.line_offset -= step;
@@ -401,17 +423,66 @@ impl App {
         } else if self.chapter_idx > 0 {
             self.load_chapter(self.chapter_idx - 1, usize::MAX);
         }
+        self.record_move(before);
     }
 
     fn chapter_next(&mut self) {
+        let before = (self.chapter_idx, self.line_offset);
         if self.chapter_idx + 1 < self.book.chapters.len() {
             self.load_chapter(self.chapter_idx + 1, 0);
         }
+        self.record_move(before);
     }
 
     fn chapter_prev(&mut self) {
+        let before = (self.chapter_idx, self.line_offset);
         if self.chapter_idx > 0 {
             self.load_chapter(self.chapter_idx - 1, 0);
+        }
+        self.record_move(before);
+    }
+
+    /// Record a completed navigation for undo. `before` is the cursor
+    /// position the reader occupied before the move. No-op moves (the
+    /// position is unchanged, e.g. `n` at the last chapter) are skipped.
+    /// A fresh move also invalidates any redo history.
+    fn record_move(&mut self, before: (usize, usize)) {
+        if (self.chapter_idx, self.line_offset) == before {
+            return;
+        }
+        Self::push_bounded(&mut self.undo_stack, before);
+        self.redo_stack.clear();
+    }
+
+    /// Undo the last navigation: pop the previous cursor position and
+    /// jump to it. The undone position is pushed onto the redo stack.
+    fn undo(&mut self) {
+        let Some(pos) = self.undo_stack.pop() else {
+            return;
+        };
+        Self::push_bounded(&mut self.redo_stack, (self.chapter_idx, self.line_offset));
+        self.load_chapter(pos.0, pos.1);
+        self.save();
+    }
+
+    /// Redo the last-undone navigation: pop the undone position and
+    /// jump back to it. The re-applied position is pushed back onto the
+    /// undo stack so `u` can walk the history again.
+    fn redo(&mut self) {
+        let Some(pos) = self.redo_stack.pop() else {
+            return;
+        };
+        Self::push_bounded(&mut self.undo_stack, (self.chapter_idx, self.line_offset));
+        self.load_chapter(pos.0, pos.1);
+        self.save();
+    }
+
+    /// Push onto a position history stack, evicting the oldest entry
+    /// once it exceeds `MAX_UNDO_HISTORY`.
+    fn push_bounded(stack: &mut Vec<(usize, usize)>, pos: (usize, usize)) {
+        stack.push(pos);
+        if stack.len() > MAX_UNDO_HISTORY {
+            stack.remove(0);
         }
     }
 
@@ -1118,5 +1189,129 @@ mod tests {
         let mut app = App::new(book, p_handle, (200, 24), 100);
         app.handle(Action::Resize(150, 24));
         assert_eq!(app.max_body_width(), 100);
+    }
+
+    #[test]
+    fn undo_returns_to_previous_position_after_chapter_next() {
+        // The motivating case: fat-finger `n` (chapter next) when you
+        // meant `j` (line down). `u` must bring you straight back.
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![
+            vec![p("line one"), p("line two")],
+            vec![p("ch2")],
+        ]);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
+        app.handle(Action::LineDown); // scroll to offset 1 in ch0
+        assert_eq!(app.line_offset(), 1);
+        app.handle(Action::ChapterNext); // the accidental jump
+        assert_eq!(app.chapter_idx(), 1);
+        assert_eq!(app.line_offset(), 0);
+        app.handle(Action::Undo);
+        assert_eq!(app.chapter_idx(), 0, "undo must return to chapter 0");
+        assert_eq!(app.line_offset(), 1, "undo must restore the exact line offset");
+    }
+
+    #[test]
+    fn undo_then_redo_round_trips() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("ch1")], vec![p("ch2")]]);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
+        app.handle(Action::ChapterNext);
+        assert_eq!(app.chapter_idx(), 1);
+        app.handle(Action::Undo);
+        assert_eq!(app.chapter_idx(), 0);
+        app.handle(Action::Redo);
+        assert_eq!(app.chapter_idx(), 1, "redo must re-apply the undone move");
+    }
+
+    #[test]
+    fn fresh_navigation_clears_redo_stack() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("ch1")], vec![p("ch2")], vec![p("ch3")]]);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
+        app.handle(Action::ChapterNext); // 0 → 1
+        app.handle(Action::ChapterNext); // 1 → 2
+        app.handle(Action::Undo); // 2 → 1
+        app.handle(Action::Undo); // 1 → 0
+        // A fresh move after undo must discard the redo history.
+        app.handle(Action::ChapterNext); // 0 → 1 (redo history invalidated)
+        assert_eq!(app.chapter_idx(), 1);
+        app.handle(Action::Redo);
+        assert_eq!(
+            app.chapter_idx(),
+            1,
+            "redo must be empty after a fresh navigation, so no further jump"
+        );
+    }
+
+    #[test]
+    fn noop_navigation_is_not_recorded_for_undo() {
+        // `n` at the last chapter is a no-op; it must not poison the
+        // undo stack (otherwise a single `u` would skip two moves).
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("ch1")], vec![p("ch2")]]);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
+        app.handle(Action::ChapterNext); // 0 → 1
+        app.handle(Action::ChapterNext); // 1 → 1 (no-op, NOT recorded)
+        app.handle(Action::ChapterNext); // 1 → 1 (no-op, NOT recorded)
+        app.handle(Action::Undo);
+        assert_eq!(
+            app.chapter_idx(),
+            0,
+            "undo should jump straight back to ch0, not ch1"
+        );
+    }
+
+    #[test]
+    fn undo_history_is_bounded() {
+        let (p_handle, _dir) = fresh_persistence();
+        // Long single chapter so LineDown can record MAX+ moves.
+        let mut blocks = Vec::new();
+        for _ in 0..200 {
+            blocks.push(p("the quick brown fox"));
+        }
+        let book = book_with_chapters(vec![blocks]);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
+        // Exceed the history bound with distinct single-line moves.
+        for _ in 0..(MAX_UNDO_HISTORY + 50) {
+            app.handle(Action::LineDown);
+        }
+        let mut undone = 0;
+        while {
+            let before = (app.chapter_idx(), app.line_offset());
+            app.handle(Action::Undo);
+            (app.chapter_idx(), app.line_offset()) != before
+        } {
+            undone += 1;
+        }
+        assert_eq!(
+            undone, MAX_UNDO_HISTORY,
+            "only the most recent MAX_UNDO_HISTORY moves are undoable"
+        );
+    }
+
+    #[test]
+    fn undo_restores_position_across_toc_jump() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("ch1")], vec![p("ch2")], vec![p("ch3")]]);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
+        app.handle(Action::ToggleToc);
+        app.handle(Action::LineDown);
+        app.handle(Action::LineDown);
+        app.handle(Action::Confirm); // jump to ch2
+        assert_eq!(app.chapter_idx(), 2);
+        app.handle(Action::Undo);
+        assert_eq!(app.chapter_idx(), 0, "TOC jump must be undoable");
+        assert_eq!(app.line_offset(), 0);
+    }
+
+    #[test]
+    fn undo_is_noop_when_no_history() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![vec![p("only")]]);
+        let mut app = App::new(book, p_handle, (80, 24), TEST_WIDTH);
+        app.handle(Action::Undo);
+        assert_eq!((app.chapter_idx(), app.line_offset()), (0, 0));
+        assert!(!app.should_quit());
     }
 }
