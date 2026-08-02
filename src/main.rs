@@ -21,7 +21,8 @@ use std::process::ExitCode;
 struct Cli {
     /// Path to an EPUB file, or a directory containing EPUBs. When a
     /// directory is given, cleader shows a library list view where you
-    /// can pick a book to read.
+    /// can pick a book to read. Defaults to the current directory.
+    #[arg(default_value = ".")]
     path: PathBuf,
 
     /// Target body text width in columns. Defaults to 80, the
