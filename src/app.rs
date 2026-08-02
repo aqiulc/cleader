@@ -270,11 +270,11 @@ impl App {
                 }
                 Action::Quit => self.show_toc = false,
                 Action::Resize(w, h) => self.resize(w, h),
-                Action::ChapterNext | Action::ChapterPrev | Action::ToggleViewMode | Action::OpenSearch => {
+                Action::ChapterNext | Action::ChapterPrev | Action::ToggleViewMode | Action::OpenSearch | Action::ExpandScanDepth => {
                     // Chapter nav while TOC is up is ambiguous — the user
                     // probably wanted TOC selection nav. Treat as no-op.
-                    // ToggleViewMode is always a no-op in reader mode (library-only action).
-                    // OpenSearch is always a no-op in reader mode (library-only action).
+                    // ToggleViewMode / OpenSearch / ExpandScanDepth are
+                    // library-only actions; no-op in reader mode.
                 }
             }
             return;
@@ -317,7 +317,7 @@ impl App {
                 // No-op outside of overlay context for now. Future
                 // features may bind it elsewhere.
             }
-            Action::ToggleViewMode | Action::OpenSearch => {
+            Action::ToggleViewMode | Action::OpenSearch | Action::ExpandScanDepth => {
                 // No-op in reader mode; library_app handles these.
             }
             Action::Quit => {

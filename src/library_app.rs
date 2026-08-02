@@ -13,7 +13,7 @@ use crate::library::LibraryEntry;
 use crate::prefs::{PrefsStore, ViewMode};
 use crate::search::{filter_indices, SearchMode, SearchState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// Time to hold at the start of a long title before scrolling begins,
@@ -92,25 +92,60 @@ pub struct LibraryApp {
     /// cleared by the same action or by `Action::Quit` (so Esc dismisses
     /// the overlay rather than quitting the library).
     show_help: bool,
+    /// Root directory this library was launched with. `None` when the
+    /// app was constructed with pre-built entries (tests, internal
+    /// tooling) — in that case the scan can't be deepened and
+    /// `expand_scan_depth` is a no-op.
+    scan_root: Option<PathBuf>,
+    /// Current scan depth: 0 = the root directory only, N = N levels of
+    /// subdirectories, `usize::MAX` = fully recursive. Only meaningful
+    /// when `scan_root` is `Some`.
+    scan_depth: usize,
 }
 
 impl LibraryApp {
     /// Production constructor: opens PrefsStore and CoverCache from the
     /// OS data dir. Falls back to disabled cache (grid view degrades to
     /// list) if the OS data dir is unavailable. Prefs failure falls back
-    /// to default (ViewMode::Grid).
-    pub fn new(entries: Vec<LibraryEntry>, viewport: (u16, u16)) -> Self {
-        Self::new_with(entries, viewport, PrefsStore::open().ok(), CoverCache::open())
+    /// to default (ViewMode::Grid). `root` is the directory the library
+    /// was scanned from and `depth` the initial scan depth — both feed
+    /// the `ExpandScanDepth` action (see `expand_scan_depth`).
+    pub fn new(
+        entries: Vec<LibraryEntry>,
+        viewport: (u16, u16),
+        root: Option<PathBuf>,
+        depth: usize,
+    ) -> Self {
+        Self::new_full(
+            entries,
+            viewport,
+            PrefsStore::open().ok(),
+            CoverCache::open(),
+            root,
+            depth,
+        )
     }
 
     /// Test/internal constructor: caller injects prefs and cache (or
-    /// `None`s for a minimal smoke harness).
+    /// `None`s for a minimal smoke harness). No scan root, so
+    /// `expand_scan_depth` is a no-op.
     #[doc(hidden)]
     pub fn new_with(
         entries: Vec<LibraryEntry>,
         viewport: (u16, u16),
         prefs: Option<PrefsStore>,
         cover_cache: Option<CoverCache>,
+    ) -> Self {
+        Self::new_full(entries, viewport, prefs, cover_cache, None, 0)
+    }
+
+    fn new_full(
+        entries: Vec<LibraryEntry>,
+        viewport: (u16, u16),
+        prefs: Option<PrefsStore>,
+        cover_cache: Option<CoverCache>,
+        scan_root: Option<PathBuf>,
+        scan_depth: usize,
     ) -> Self {
         let view_mode = prefs
             .as_ref()
@@ -139,6 +174,8 @@ impl LibraryApp {
             pre_search_selection: 0,
             marquee_start: Some(Instant::now()),
             show_help: false,
+            scan_root,
+            scan_depth,
         }
     }
 
@@ -210,6 +247,70 @@ impl LibraryApp {
 
     pub fn show_help(&self) -> bool {
         self.show_help
+    }
+
+    /// Root directory this library was scanned from, if any. `None` for
+    /// app instances built with pre-built entries.
+    pub fn scan_root(&self) -> Option<&Path> {
+        self.scan_root.as_deref()
+    }
+
+    /// Current scan depth (0 = root only, `usize::MAX` = fully
+    /// recursive). `None` when the app has no scan root, meaning depth
+    /// can't be expanded.
+    pub fn scan_depth(&self) -> Option<usize> {
+        self.scan_root.as_ref().map(|_| self.scan_depth)
+    }
+
+    /// Rescan the root at one deeper level and swap in the results.
+    /// Preserves the currently-selected book (matched by path) so the
+    /// cursor doesn't jump after expanding. No-op when there is no scan
+    /// root or the scan is already fully recursive.
+    pub fn expand_scan_depth(&mut self) {
+        let Some(root) = self.scan_root.clone() else {
+            return;
+        };
+        if self.scan_depth == usize::MAX {
+            return;
+        }
+        let new_depth = self.scan_depth.saturating_add(1);
+        let selected_path = self.entries.get(self.selection).map(|e| e.path.clone());
+        match crate::library::scan_directory_at_depth(&root, new_depth) {
+            Ok(entries) => {
+                self.replace_entries(entries);
+                self.scan_depth = new_depth;
+                if let Some(path) = selected_path {
+                    if let Some(idx) = self.entries.iter().position(|e| e.path == path) {
+                        self.selection = idx;
+                        self.marquee_start = Some(Instant::now());
+                    }
+                }
+            }
+            Err(err) => self.save_error = Some(format!("expand failed: {err}")),
+        }
+    }
+
+    /// Replace the entry list and every structure parallel to it, then
+    /// clamp the selection to the new bounds.
+    fn replace_entries(&mut self, entries: Vec<LibraryEntry>) {
+        self.entries = entries;
+        self.book_ids = vec![None; self.entries.len()];
+        self.entries_lowercased = self
+            .entries
+            .iter()
+            .map(|e| format!("{}\n{}", e.title.to_lowercase(), e.author.to_lowercase()))
+            .collect();
+        self.all_indices = (0..self.entries.len()).collect();
+        self.selection = self.selection.min(self.entries.len().saturating_sub(1));
+        self.pre_search_selection = self
+            .pre_search_selection
+            .min(self.entries.len().saturating_sub(1));
+        if matches!(self.search.mode, SearchMode::Editing | SearchMode::Applied) {
+            self.refilter();
+            self.selection = self
+                .selection
+                .min(self.search.filtered.len().saturating_sub(1));
+        }
     }
 
     /// Request covers for the given entry indices. Resolves each index
@@ -478,6 +579,10 @@ impl LibraryApp {
             Action::OpenSearch => {
                 self.show_help = false;
                 self.open_search();
+            }
+            Action::ExpandScanDepth => {
+                self.show_help = false;
+                self.expand_scan_depth();
             }
             Action::ToggleHelp => {
                 self.show_help = !self.show_help;
@@ -1200,6 +1305,114 @@ mod tests {
         assert!(
             elapsed_post_nav < elapsed_pre_nav,
             "selection change should reset marquee_start; got pre={elapsed_pre_nav} post={elapsed_post_nav}"
+        );
+    }
+
+    fn app_with_root(root: &Path) -> LibraryApp {
+        let entries = crate::library::scan_directory_at_depth(root, 0).unwrap();
+        LibraryApp::new_full(
+            entries,
+            (80, 24),
+            None,
+            None,
+            Some(root.to_path_buf()),
+            0,
+        )
+    }
+
+    #[test]
+    fn expand_scan_depth_adds_subfolder_books() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("top.epub"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/nested.epub"), "x").unwrap();
+        let mut app = app_with_root(dir.path());
+        assert_eq!(app.entries().len(), 1);
+        assert_eq!(app.scan_depth(), Some(0));
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(app.scan_depth(), Some(1));
+        let stems: Vec<String> = app
+            .entries()
+            .iter()
+            .map(|e| e.path.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(stems, vec!["nested", "top"]);
+    }
+
+    #[test]
+    fn expand_scan_depth_preserves_selection_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("top.epub"), "x").unwrap();
+        std::fs::write(dir.path().join("zebra.epub"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/aardvark.epub"), "x").unwrap();
+        let mut app = app_with_root(dir.path());
+        app.handle(Action::LineDown); // selection → 1 (zebra)
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(app.selection(), 2, "selection should follow the same book");
+        assert!(
+            app.entries()[app.selection()].path.ends_with("zebra.epub"),
+            "the preserved selection should be the previously-selected book"
+        );
+    }
+
+    #[test]
+    fn expand_scan_depth_on_empty_root_stays_empty_and_clamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_root(dir.path());
+        assert_eq!(app.entries().len(), 0);
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(app.entries().len(), 0);
+        assert_eq!(app.selection(), 0);
+        assert_eq!(app.scan_depth(), Some(1));
+    }
+
+    #[test]
+    fn expand_scan_depth_is_noop_without_root() {
+        let mut app = LibraryApp::new_with(vec![entry("A")], (80, 24), None, None);
+        assert_eq!(app.scan_depth(), None);
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(app.entries().len(), 1);
+        assert_eq!(app.scan_depth(), None);
+    }
+
+    #[test]
+    fn expand_scan_depth_is_noop_when_fully_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("top.epub"), "x").unwrap();
+        let entries = crate::library::scan_directory_at_depth(dir.path(), usize::MAX).unwrap();
+        let mut app = LibraryApp::new_full(
+            entries,
+            (80, 24),
+            None,
+            None,
+            Some(dir.path().to_path_buf()),
+            usize::MAX,
+        );
+        assert_eq!(app.scan_depth(), Some(usize::MAX));
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(app.scan_depth(), Some(usize::MAX));
+        assert_eq!(app.entries().len(), 1);
+    }
+
+    #[test]
+    fn expand_scan_depth_refilters_active_search() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("top.epub"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/wanted.epub"), "x").unwrap();
+        let mut app = app_with_root(dir.path());
+        app.handle(Action::OpenSearch);
+        for ch in "wanted".chars() {
+            app.handle_search_input(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.handle_search_input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // Applied
+        assert_eq!(app.display_indices().len(), 0, "no match at depth 0");
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(
+            app.display_indices().len(),
+            1,
+            "active filter should re-run against the expanded entries"
         );
     }
 }

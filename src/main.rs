@@ -84,17 +84,14 @@ fn run_library_session(
     dir: &std::path::Path,
     max_body_width: u16,
 ) -> anyhow::Result<()> {
-    let entries = cleader::library::scan_directory(dir)?;
-    if entries.is_empty() {
-        return Err(anyhow::anyhow!(
-            "no EPUBs found in {} (scan does not recurse into subdirectories)",
-            dir.display()
-        ));
-    }
+    let entries = cleader::library::scan_directory_at_depth(dir, 0)?;
+    // An empty scan is not an error: the library opens with a hint to
+    // expand the scan into subdirectories (see `e` expand in the UI).
 
     let mut terminal = setup_terminal()?;
     let viewport = terminal.size().map(|s| (s.width, s.height))?;
-    let mut library_app = cleader::library_app::LibraryApp::new(entries, viewport);
+    let mut library_app =
+        cleader::library_app::LibraryApp::new(entries, viewport, Some(dir.to_path_buf()), 0);
 
     let outcome: anyhow::Result<()> = loop {
         // Run library until selection or quit.
@@ -307,6 +304,7 @@ fn library_event_loop(
                         search_query,
                         search_mode,
                         marquee_offset: marquee_offset_val,
+                        scan_depth: app.scan_depth(),
                         show_help,
                     },
                 );

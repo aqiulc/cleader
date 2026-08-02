@@ -41,8 +41,23 @@ pub struct LibraryRenderInput<'a> {
     /// LibraryApp::marquee_elapsed_ms and the selected cell's title
     /// overflow.
     pub marquee_offset: usize,
+    /// Current scan depth of the library (`Some(n)` when launched from a
+    /// directory: 0 = top only, `usize::MAX` = fully recursive). `None`
+    /// when the app has no scan root, in which case no depth is shown.
+    /// Drives the "depth" label in the title bar and the `e` expand hint.
+    pub scan_depth: Option<usize>,
     /// True when the help overlay should be drawn on top of everything.
     pub show_help: bool,
+}
+
+/// Title-bar suffix describing the current scan depth. Empty when the
+/// library has no scan root (depth isn't tracked or expandable).
+fn depth_label(depth: Option<usize>) -> String {
+    match depth {
+        None => String::new(),
+        Some(usize::MAX) => " · recursive ".to_string(),
+        Some(n) => format!(" · depth {n} "),
+    }
 }
 
 pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'_>) {
@@ -109,7 +124,11 @@ fn render_library_list(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
     // (which the footer surfaces as "N matches"). This deliberate split
     // gives the user both numbers at a glance.
     let title = TuiSpan::styled(
-        format!(" cleader library — {} book(s) ", input.entries.len()),
+        format!(
+            " cleader library — {} book(s){}",
+            input.entries.len(),
+            depth_label(input.scan_depth)
+        ),
         Style::default().add_modifier(Modifier::BOLD),
     );
     frame.render_widget(Paragraph::new(Line::from(title)), chunks[0]);
@@ -119,6 +138,9 @@ fn render_library_list(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
         && !matches!(input.search_mode, crate::search::SearchMode::Idle)
     {
         render_no_matches(frame, chunks[1]);
+    } else if input.entries.is_empty() {
+        // Empty library (no filter): hint at the expand action.
+        render_empty_library(frame, chunks[1]);
     } else {
         // List body. `display_indices` is the sequence to render.
         let visible_rows = chunks[1].height as usize;
@@ -157,7 +179,7 @@ fn render_library_list(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
             query: input.search_query,
             matches: input.display_indices.len(),
             warning: input.warning,
-            default_hint: " Enter open · ↑↓ navigate · / search · g grid · ? help · q quit ",
+            default_hint: " Enter open · ↑↓ navigate · / search · g grid · e expand · ? help · q quit ",
         },
     );
 }
@@ -179,7 +201,11 @@ fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
     // (which the footer surfaces as "N matches"). This deliberate split
     // gives the user both numbers at a glance.
     let title = TuiSpan::styled(
-        format!(" cleader library — {} book(s) ", input.entries.len()),
+        format!(
+            " cleader library — {} book(s){}",
+            input.entries.len(),
+            depth_label(input.scan_depth)
+        ),
         Style::default().add_modifier(Modifier::BOLD),
     );
     frame.render_widget(Paragraph::new(Line::from(title)), outer[0]);
@@ -190,6 +216,9 @@ fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
         && !matches!(input.search_mode, crate::search::SearchMode::Idle)
     {
         render_no_matches(frame, grid_area);
+    } else if input.entries.is_empty() {
+        // Empty library (no filter): hint at the expand action.
+        render_empty_library(frame, grid_area);
     } else {
         // Grid math, using display_indices length as total.
         let total = input.display_indices.len();
@@ -310,7 +339,7 @@ fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
             query: input.search_query,
             matches: input.display_indices.len(),
             warning: input.warning,
-            default_hint: " Enter open · ↑↓ navigate · / search · g list · ? help · q quit ",
+            default_hint: " Enter open · ↑↓ navigate · / search · g list · e expand · ? help · q quit ",
         },
     );
 }
@@ -389,7 +418,28 @@ fn render_no_matches(frame: &mut Frame, area: Rect) {
     frame.render_widget(para, centered);
 }
 
-/// Truncate a string to fit within `max_cols` display columns. Uses
+/// Render a centered hint when the library is empty (no filter active):
+/// the folder had no EPUBs at the current scan depth, so point the user
+/// at the `e` expand action.
+fn render_empty_library(frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let msg = "no EPUBs here — press e to search subfolders";
+    let line = Line::from(TuiSpan::styled(
+        msg,
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    let para = Paragraph::new(line).alignment(Alignment::Center);
+    let center_y = area.y + area.height / 2;
+    let centered = Rect {
+        x: area.x,
+        y: center_y,
+        width: area.width,
+        height: 1,
+    };
+    frame.render_widget(para, centered);
+}
 /// unicode-width; appends "…" if anything was cut.
 pub(crate) fn truncate_to_width(s: &str, max_cols: usize) -> String {
     use unicode_width::UnicodeWidthChar;
@@ -462,6 +512,7 @@ mod tests {
                 search_query: None,
                 search_mode: crate::search::SearchMode::Idle,
                 marquee_offset: 0,
+                scan_depth: None,
                 show_help: false,
             });
         }).unwrap();
@@ -491,6 +542,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -521,6 +573,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -564,6 +617,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -608,6 +662,7 @@ mod tests {
                         search_query: None,
                         search_mode: crate::search::SearchMode::Idle,
                         marquee_offset: 0,
+                        scan_depth: None,
                         show_help: false,
                     },
                 );
@@ -654,6 +709,7 @@ mod tests {
                     search_query: Some("book"),
                     search_mode: crate::search::SearchMode::Editing,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -690,6 +746,7 @@ mod tests {
                     search_query: Some("book"),
                     search_mode: crate::search::SearchMode::Applied,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -726,6 +783,7 @@ mod tests {
                     search_query: Some("xyz"),
                     search_mode: crate::search::SearchMode::Editing,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -792,6 +850,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -819,6 +878,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 7,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -866,6 +926,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 7,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -904,6 +965,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: true,
                 },
             );
