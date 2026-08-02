@@ -35,6 +35,7 @@ const HELP_LINES: &[(&str, &str)] = &[
     ("  Next chapter", "n"),
     ("  Previous chapter", "N (Shift+n)"),
     ("  Table of contents", "t"),
+    ("  Toggle width mode", "w"),
     ("", ""),
     ("Anywhere", ""),
     ("  Toggle this help", "?"),
