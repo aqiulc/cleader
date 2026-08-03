@@ -1,18 +1,27 @@
 //! Cover thumbnail cache for the library grid view.
 //!
 //! Holds an in-memory map of `BookId -> CoverState` plus a disk cache
-//! at `<data_dir>/covers/<book_id>.txt`. ASCII generation runs on a
-//! background worker thread spawned by `CoverCache::open`. Disk
+//! at `<data_dir>/covers/<book_id>.txt`. All file I/O — including the
+//! whole-file read needed to compute a `BookId` (SHA-256 of the EPUB
+//! bytes) — runs on a background worker thread spawned by
+//! `CoverCache::open`, so the UI thread never touches book bytes. Disk
 //! reads/writes are best-effort: a failure leaves the memory cache
 //! authoritative for the current session and silently retries next
 //! launch.
 //!
 //! Public API:
 //! - `CoverCache::open()` (or `open_at()` for tests) spawns the worker
-//! - `enqueue(book_id, epub_path)` requests a cover (idempotent — disk
-//!   hit short-circuits; otherwise queues the worker)
-//! - `drain_finished()` pulls finished covers off the channel each frame
+//! - `enqueue(epub_path)` requests a cover. The worker reads the file,
+//!   resolves its `BookId`, serves a disk-cache hit if present, and
+//!   otherwise generates ASCII art. Callers must deduplicate paths they
+//!   have already enqueued.
+//! - `drain_finished()` pulls finished jobs off the channel each frame,
+//!   storing the lines in memory and returning the resolved
+//!   `(path, book_id)` pairs so the caller can associate ids with its
+//!   entries (a `None` id means the file couldn't be read and the
+//!   entry stays unresolved).
 //! - `get(book_id)` returns `Some(&[String])` only when Ready
+//! - `has_pending()` is true while any job is in flight
 //! - Drop joins the worker cleanly
 //!
 //! Placeholder lines are 22 cols × 17 rows so cell layout never shifts
@@ -126,26 +135,40 @@ use std::thread;
 
 /// State of a single cover in the in-memory map.
 enum CoverState {
-    Pending,
     Ready(Vec<String>),
 }
 
 struct CoverJob {
-    book_id: BookId,
     epub_path: PathBuf,
 }
 
-struct CoverResult {
-    book_id: BookId,
+/// What the worker sends back for one job, before the cache folds the
+/// lines into memory.
+struct WorkerResult {
+    epub_path: PathBuf,
+    book_id: Option<BookId>,
     lines: Vec<String>,
+}
+
+/// A resolved cover job surfaced to the caller by [`CoverCache::drain_finished`].
+///
+/// `book_id` is `None` only when the EPUB couldn't be read at all (deleted,
+/// moved, unreadable) — the caller should leave its entry unresolved.
+pub struct CoverResult {
+    pub path: PathBuf,
+    pub book_id: Option<BookId>,
 }
 
 pub struct CoverCache {
     memory: HashMap<BookId, CoverState>,
-    cache_dir: PathBuf,
     job_tx: Option<mpsc::Sender<CoverJob>>,
-    result_rx: mpsc::Receiver<CoverResult>,
+    result_rx: mpsc::Receiver<WorkerResult>,
     worker: Option<thread::JoinHandle<()>>,
+    /// Number of jobs sent to the worker that haven't come back yet.
+    /// Every job yields exactly one result (or the sender drops on
+    /// shutdown), so this tracks `has_pending` without needing the
+    /// BookId up front.
+    in_flight: usize,
 }
 
 impl CoverCache {
@@ -162,7 +185,7 @@ impl CoverCache {
     #[doc(hidden)]
     pub fn open_at(cache_dir: PathBuf) -> Self {
         let (job_tx, job_rx) = mpsc::channel::<CoverJob>();
-        let (result_tx, result_rx) = mpsc::channel::<CoverResult>();
+        let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
         let worker_cache_dir = cache_dir.clone();
         let worker = thread::Builder::new()
             .name("cleader-cover-worker".into())
@@ -170,62 +193,58 @@ impl CoverCache {
             .expect("spawning cover worker thread should succeed");
         Self {
             memory: HashMap::new(),
-            cache_dir,
             job_tx: Some(job_tx),
             result_rx,
             worker: Some(worker),
+            in_flight: 0,
         }
     }
 
-    /// Returns `Some` only when a Ready cover is in memory. Pending and
-    /// Miss both return `None`; renderer falls back to the placeholder.
+    /// Returns `Some` only when a Ready cover is in memory. Missing
+    /// covers return `None`; renderer falls back to the placeholder.
     pub fn get(&self, book_id: &BookId) -> Option<&[String]> {
         match self.memory.get(book_id)? {
             CoverState::Ready(lines) => Some(lines),
-            CoverState::Pending => None,
         }
     }
 
-    /// Request a cover. No-op if already Ready or Pending. On a memory
-    /// miss, tries disk first (fast hot-path); on disk miss, queues the
-    /// worker.
-    pub fn enqueue(&mut self, book_id: BookId, epub_path: PathBuf) {
-        if self.memory.contains_key(&book_id) {
-            return;
-        }
-        // Try disk first. Reject malformed cache (wrong line count)
-        // and fall through to regenerate — `write_cached`'s doc comment
-        // flagged this degenerate case.
-        if let Some(lines) = read_cached(&self.cache_dir, &book_id) {
-            if lines.len() == COVER_THUMBNAIL_HEIGHT as usize {
-                self.memory.insert(book_id, CoverState::Ready(lines));
-                return;
+    /// Request a cover for an EPUB file. The worker reads the file and
+    /// computes its `BookId`, so the caller doesn't need to touch the
+    /// bytes (and must deduplicate paths it has already enqueued).
+    /// Disk-cache hits are served inside the worker, so this is a
+    /// no-op only if the worker channel is gone.
+    pub fn enqueue(&mut self, epub_path: PathBuf) {
+        if let Some(tx) = &self.job_tx {
+            if tx.send(CoverJob { epub_path }).is_ok() {
+                self.in_flight += 1;
             }
         }
-        // Disk miss — queue the worker.
-        self.memory.insert(book_id.clone(), CoverState::Pending);
-        if let Some(tx) = &self.job_tx {
-            let _ = tx.send(CoverJob { book_id, epub_path });
-        }
     }
 
-    /// True if any cover in the memory map is still in the Pending
-    /// state (the worker is rendering it). Used by the event loop to
-    /// decide whether to use the short (50ms) poll cadence or relax
-    /// to the long (500ms) idle cadence.
+    /// True if any cover job is still being processed by the worker.
+    /// Used by the event loop to decide whether to use the short (50ms)
+    /// poll cadence or relax to the long (500ms) idle cadence.
     pub fn has_pending(&self) -> bool {
-        self.memory.values().any(|s| matches!(s, CoverState::Pending))
+        self.in_flight > 0
     }
 
-    /// Pull any finished covers from the worker into the memory map.
-    /// Returns true if at least one cover arrived (caller redraws).
-    pub fn drain_finished(&mut self) -> bool {
-        let mut any = false;
-        while let Ok(CoverResult { book_id, lines }) = self.result_rx.try_recv() {
-            self.memory.insert(book_id, CoverState::Ready(lines));
-            any = true;
+    /// Pull any finished covers from the worker into the memory map and
+    /// return the resolved `(path, book_id)` pairs so the caller can
+    /// associate ids with its entries. Returns true via the non-empty
+    /// vec when at least one cover arrived (caller redraws).
+    pub fn drain_finished(&mut self) -> Vec<CoverResult> {
+        let mut results = Vec::new();
+        while let Ok(WorkerResult { epub_path, book_id, lines }) = self.result_rx.try_recv() {
+            self.in_flight = self.in_flight.saturating_sub(1);
+            results.push(CoverResult {
+                path: epub_path,
+                book_id: book_id.clone(),
+            });
+            if let Some(id) = book_id {
+                self.memory.insert(id, CoverState::Ready(lines));
+            }
         }
-        any
+        results
     }
 }
 
@@ -241,26 +260,52 @@ impl Drop for CoverCache {
 
 fn worker_loop(
     job_rx: mpsc::Receiver<CoverJob>,
-    result_tx: mpsc::Sender<CoverResult>,
+    result_tx: mpsc::Sender<WorkerResult>,
     cache_dir: PathBuf,
 ) {
     while let Ok(job) = job_rx.recv() {
-        let lines = match generate_cover(&job.epub_path) {
-            Some(real_cover) => {
-                // Best-effort disk write — failure is non-fatal.
-                let _ = write_cached(&cache_dir, &job.book_id, &real_cover);
-                real_cover
+        // Reading the whole file to derive the content-hash BookId is
+        // the one piece of per-book I/O the UI thread used to do; it
+        // lives here so the event loop never blocks on book bytes.
+        let (book_id, lines) = match std::fs::read(&job.epub_path) {
+            Ok(bytes) => {
+                let id = BookId::from_bytes(&bytes);
+                let lines = match read_cached(&cache_dir, &id) {
+                    // Reject malformed cache (wrong line count) and fall
+                    // through to regenerate — `write_cached`'s doc
+                    // comment flagged this degenerate case.
+                    Some(cached) if cached.len() == COVER_THUMBNAIL_HEIGHT as usize => cached,
+                    _ => match generate_cover(&job.epub_path) {
+                        Some(real_cover) => {
+                            // Best-effort disk write — failure is non-fatal.
+                            let _ = write_cached(&cache_dir, &id, &real_cover);
+                            real_cover
+                        }
+                        None => {
+                            // Decode failed (no cover, unsupported format,
+                            // corrupt EPUB, etc.). Send placeholder to render
+                            // but DO NOT write it to disk — a future
+                            // image-crate update or EPUB fix should be able
+                            // to retry.
+                            PLACEHOLDER.iter().map(|s| s.to_string()).collect()
+                        }
+                    },
+                };
+                (Some(id), lines)
             }
-            None => {
-                // Decode failed (no cover, unsupported format, corrupt
-                // EPUB, etc.). Send placeholder to render but DO NOT
-                // write it to disk — a future image-crate update or
-                // EPUB fix should be able to retry.
-                PLACEHOLDER.iter().map(|s| s.to_string()).collect()
+            Err(_) => {
+                // Can't read the file at all (deleted, moved, unreadable).
+                // Report no id so the caller leaves the entry unresolved
+                // instead of re-requesting; render with the placeholder.
+                (None, PLACEHOLDER.iter().map(|s| s.to_string()).collect())
             }
         };
         if result_tx
-            .send(CoverResult { book_id: job.book_id, lines })
+            .send(WorkerResult {
+                epub_path: job.epub_path,
+                book_id,
+                lines,
+            })
             .is_err()
         {
             // Receiver dropped — main thread shutting down. Stop.
@@ -332,6 +377,20 @@ mod tests {
         BookId::from_bytes(seed)
     }
 
+    /// Poll `drain_finished` until the worker delivers one result.
+    /// Times out after 500ms so a hung worker fails the test instead of
+    /// deadlocking it.
+    fn wait_for_result(cache: &mut CoverCache) -> CoverResult {
+        for _ in 0..50 {
+            let results = cache.drain_finished();
+            if let Some(result) = results.into_iter().next() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("no cover result within 500ms");
+    }
+
     #[test]
     fn placeholder_dimensions_are_22x17() {
         assert_eq!(PLACEHOLDER.len(), COVER_THUMBNAIL_HEIGHT as usize);
@@ -395,61 +454,56 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_with_disk_cache_hit_populates_memory_synchronously() {
+    fn enqueue_serves_cached_cover_from_disk_without_regenerating() {
+        // The worker computes the BookId from the file bytes, then checks
+        // the disk cache before decoding. A pre-seeded cache file must be
+        // served as-is.
         let dir = tempfile::tempdir().unwrap();
-        let id = book_id(b"disk-hit");
+        let file = dir.path().join("book.epub");
+        std::fs::write(&file, b"real epub bytes").unwrap();
+        let id = BookId::from_bytes(b"real epub bytes");
         let lines: Vec<String> = (0..17).map(|i| format!("L{i:02}{}", " ".repeat(20))).collect();
         write_cached(dir.path(), &id, &lines).unwrap();
 
         let mut cache = CoverCache::open_at(dir.path().to_path_buf());
-        // Path doesn't have to exist on disk — the disk-cache hit shortcircuits.
-        cache.enqueue(id.clone(), PathBuf::from("/does/not/matter.epub"));
-        let got = cache.get(&id).expect("disk hit should populate memory");
+        cache.enqueue(file);
+        let result = wait_for_result(&mut cache);
+        assert_eq!(result.book_id, Some(id.clone()), "worker should resolve the content hash");
+        let got = cache.get(&id).expect("cached cover should be in memory");
         assert_eq!(got.len(), 17);
-        assert!(got[0].starts_with("L00"));
+        assert_eq!(got, lines.as_slice());
     }
 
     #[test]
-    fn enqueue_is_idempotent() {
-        // Calling enqueue twice on the same id should not panic or
-        // double-queue; the second call observes the Pending state and
-        // returns immediately.
+    fn invalid_epub_yields_placeholder_but_resolves_book_id() {
+        // A readable file that isn't a valid EPUB: the worker can hash it
+        // (so the caller learns its BookId) but cover generation fails, so
+        // the placeholder is served from memory under that id.
         let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("garbage.epub");
+        std::fs::write(&file, b"not a zip archive").unwrap();
         let mut cache = CoverCache::open_at(dir.path().to_path_buf());
-        let id = book_id(b"idempotent");
-        let bogus = PathBuf::from("/tmp/does-not-exist.epub");
-        cache.enqueue(id.clone(), bogus.clone());
-        cache.enqueue(id.clone(), bogus.clone());
-        // get() still None (Pending) — the duplicate enqueue is a no-op.
-        // We can't assert "exactly one job sent" from outside, but we
-        // can assert no panic and memory remains in Pending state by
-        // dropping the cache (worker exit is the only synchronization).
-        drop(cache);
-    }
-
-    #[test]
-    fn worker_generates_cover_for_missing_path_as_placeholder() {
-        // EPUB path that doesn't exist → generate_cover returns None →
-        // worker falls back to placeholder → drain_finished delivers it.
-        let dir = tempfile::tempdir().unwrap();
-        let mut cache = CoverCache::open_at(dir.path().to_path_buf());
-        let id = book_id(b"missing-epub");
-        cache.enqueue(id.clone(), PathBuf::from("/no/such/book.epub"));
-
-        // Wait up to 500 ms for the worker to deliver. In practice this
-        // is <10 ms; the loop is for CI flakiness tolerance.
-        let mut got = None;
-        for _ in 0..50 {
-            cache.drain_finished();
-            if let Some(lines) = cache.get(&id) {
-                got = Some(lines.to_vec());
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let got = got.expect("worker should deliver placeholder within 500ms");
+        cache.enqueue(file.clone());
+        let result = wait_for_result(&mut cache);
+        assert_eq!(result.path, file);
+        let id = result.book_id.expect("readable file should resolve a book_id");
+        let got = cache.get(&id).expect("placeholder should be in memory");
         assert_eq!(got.len(), 17);
         assert_eq!(got[0], PLACEHOLDER[0]);
+    }
+
+    #[test]
+    fn missing_path_yields_result_with_no_book_id() {
+        // An unreadable path: the worker can't hash it, so the result
+        // carries no BookId and the caller should leave its entry
+        // unresolved instead of re-requesting.
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = CoverCache::open_at(dir.path().to_path_buf());
+        let missing = PathBuf::from("/no/such/book.epub");
+        cache.enqueue(missing.clone());
+        let result = wait_for_result(&mut cache);
+        assert_eq!(result.path, missing);
+        assert!(result.book_id.is_none());
     }
 
     #[test]
@@ -465,23 +519,18 @@ mod tests {
 
     #[test]
     fn worker_does_not_cache_placeholder_to_disk() {
-        // A book that fails to decode (missing path) should NOT have
-        // its placeholder written to disk — otherwise a one-time
-        // failure becomes a permanent stuck placeholder.
+        // A book that fails to decode (readable, but not a valid EPUB)
+        // should NOT have its placeholder written to disk — otherwise a
+        // one-time failure becomes a permanent stuck placeholder.
         let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("will-fail-to-decode.epub");
+        std::fs::write(&file, b"garbage bytes").unwrap();
         let mut cache = CoverCache::open_at(dir.path().to_path_buf());
-        let id = book_id(b"will-fail-to-decode");
-        cache.enqueue(id.clone(), PathBuf::from("/no/such/book.epub"));
-
-        // Wait for the worker to deliver placeholder.
-        for _ in 0..50 {
-            cache.drain_finished();
-            if cache.get(&id).is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(cache.get(&id).is_some(), "worker should deliver placeholder");
+        cache.enqueue(file);
+        let result = wait_for_result(&mut cache);
+        let id = result
+            .book_id
+            .expect("readable file should resolve a book_id");
 
         // Drop the cache so the worker exits.
         drop(cache);
@@ -540,15 +589,13 @@ mod tests {
     #[test]
     fn has_pending_true_after_enqueue_then_false_after_drain() {
         let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("book.epub");
+        std::fs::write(&file, b"x").unwrap();
         let mut cache = CoverCache::open_at(dir.path().to_path_buf());
-        let id = book_id(b"pending-test");
-        cache.enqueue(id.clone(), PathBuf::from("/no/such/book.epub"));
-        // Immediately after enqueue, the entry is Pending in memory.
-        // (The worker hasn't replied yet — the placeholder fallback
-        // takes a few ms to arrive.)
-        assert!(cache.has_pending(), "Pending immediately after enqueue");
+        cache.enqueue(file);
+        assert!(cache.has_pending(), "in-flight job counts as pending");
 
-        // Wait for the worker to deliver the placeholder.
+        // Wait for the worker to deliver.
         for _ in 0..50 {
             cache.drain_finished();
             if !cache.has_pending() {
@@ -556,6 +603,6 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(!cache.has_pending(), "no longer Pending after drain");
+        assert!(!cache.has_pending(), "no longer pending after drain");
     }
 }

@@ -6,14 +6,14 @@
 //! the regular Reader with that book. On Esc/q/Ctrl+C, the app quits
 //! with no selection.
 
-use crate::cover_cache::CoverCache;
+use crate::cover_cache::{CoverCache, CoverResult};
 use crate::epub::BookId;
 use crate::input::Action;
 use crate::library::{LibraryEntry, LibraryScanner};
 use crate::prefs::{PrefsStore, ViewMode};
 use crate::search::{filter_indices, SearchMode, SearchState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -59,9 +59,11 @@ pub fn marquee_offset(elapsed_ms: u128, overflow: usize) -> usize {
 
 pub struct LibraryApp {
     entries: Vec<LibraryEntry>,
-    /// Parallel to `entries`: `book_ids[i]` is the BookId for `entries[i]`,
-    /// computed lazily on first call to `request_visible_covers(i)`.
-    /// Length always equals `entries.len()`.
+    /// Parallel to `entries`: `book_ids[i]` is the BookId for `entries[i]`.
+    /// Computed off-thread by the cover worker (which reads the file and
+    /// content-hashes it) and recorded here once the result drains back
+    /// through `record_cover_results`. `None` means the id isn't known
+    /// yet — or, if the file is unreadable, will never be known.
     book_ids: Vec<Option<BookId>>,
     /// Parallel to `entries`: pre-lowercased `"{title}\n{author}"` string
     /// for fast substring matching during search. Built once at
@@ -106,6 +108,11 @@ pub struct LibraryApp {
     /// this is set. Managed by the library event loop around
     /// `expand_scan_depth`.
     scanning: bool,
+    /// Paths whose cover job is in flight or whose BookId failed to
+    /// resolve. `request_visible_covers` skips these so a visible cell
+    /// isn't re-enqueued every frame; the entry is removed (by path)
+    /// when its result arrives with a BookId.
+    pending: HashSet<PathBuf>,
 }
 
 impl LibraryApp {
@@ -175,6 +182,7 @@ impl LibraryApp {
             show_help: false,
             scanner,
             scanning: false,
+            pending: HashSet::new(),
         }
     }
 
@@ -339,33 +347,47 @@ impl LibraryApp {
         }
     }
 
-    /// Request covers for the given entry indices. Resolves each index
-    /// to a `BookId` (lazily — computed once and stored in
-    /// `self.book_ids[idx]`), then calls `enqueue`. Indices out of range
-    /// are silently skipped.
-    ///
-    /// Each uncached index performs a synchronous file read on the
-    /// calling thread (needed because `BookId` is content-hashed from
-    /// the EPUB bytes). Callers must restrict `indices` to the visible
-    /// window — typically the cells currently on screen — to avoid
-    /// perceptible stalls when scrolling through large libraries.
+    /// Request covers for the given entry indices. Each index whose
+    /// BookId isn't known yet is enqueued with the cover worker, which
+    /// reads the file, computes the content-hash `BookId`, and (once the
+    /// result is drained back via [`LibraryApp::record_cover_results`])
+    /// the id is stored in `self.book_ids[idx]`. Enqueueing is
+    /// path-deduplicated through `self.pending` so a visible cell isn't
+    /// re-enqueued every frame. Indices out of range are silently
+    /// skipped. Never touches book bytes on the calling thread.
     pub fn request_visible_covers(&mut self, indices: impl IntoIterator<Item = usize>) {
-        let Some(cache) = self.cover_cache.as_mut() else {
-            return;
-        };
+        let mut to_enqueue: Vec<PathBuf> = Vec::new();
         for idx in indices {
             let Some(entry) = self.entries.get(idx) else {
                 continue;
             };
-            // Lazy-compute the BookId from the file bytes the first
-            // time we need it. Failure (e.g. file moved) just skips.
-            if self.book_ids[idx].is_none() {
-                if let Ok(bytes) = std::fs::read(&entry.path) {
-                    self.book_ids[idx] = Some(BookId::from_bytes(&bytes));
-                }
+            if self.book_ids[idx].is_some() {
+                continue;
             }
-            if let Some(id) = &self.book_ids[idx] {
-                cache.enqueue(id.clone(), entry.path.clone());
+            if self.pending.insert(entry.path.clone()) {
+                to_enqueue.push(entry.path.clone());
+            }
+        }
+        if let Some(cache) = self.cover_cache.as_mut() {
+            for path in to_enqueue {
+                cache.enqueue(path);
+            }
+        }
+    }
+
+    /// Apply finished cover jobs to the entry list. For each result with
+    /// a resolved BookId, matches the result back to its entry by path
+    /// and stores the id. Entries whose file couldn't be read stay
+    /// unresolved (their path is left in `pending` so they aren't
+    /// re-requested). The main event loop calls this right after
+    /// `drain_finished()` each frame.
+    pub fn record_cover_results(&mut self, results: Vec<CoverResult>) {
+        for result in results {
+            if result.book_id.is_some() {
+                self.pending.remove(&result.path);
+                if let Some(idx) = self.entries.iter().position(|e| e.path == result.path) {
+                    self.book_ids[idx] = result.book_id;
+                }
             }
         }
     }
@@ -1340,6 +1362,25 @@ mod tests {
         LibraryApp::with_entries(entries, (80, 24), None, None, Some(scanner))
     }
 
+    /// Drain the cover worker and apply results until `idx` resolves a
+    /// BookId. Fails the test after 500ms so a stuck worker doesn't hang.
+    fn wait_for_book_id(app: &mut LibraryApp, idx: usize) {
+        for _ in 0..50 {
+            let results = app
+                .cover_cache_mut()
+                .map(|c| c.drain_finished())
+                .unwrap_or_default();
+            if !results.is_empty() {
+                app.record_cover_results(results);
+            }
+            if app.book_id(idx).is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("book_id {idx} did not resolve within 500ms");
+    }
+
     #[test]
     fn expand_scan_depth_adds_subfolder_books() {
         let dir = tempfile::tempdir().unwrap();
@@ -1432,9 +1473,9 @@ mod tests {
 
     #[test]
     fn expand_preserves_computed_book_ids_by_path() {
-        // An already-computed BookId must survive an expand so covers
-        // for known books aren't re-hashed / re-requested. New entries
-        // come in with no cached id.
+        // A resolved BookId must survive an expand so covers for known
+        // books aren't re-hashed / re-requested. New entries come in
+        // with no id until their cover job returns.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("top.epub"), "x").unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
@@ -1446,6 +1487,7 @@ mod tests {
         let mut app = LibraryApp::with_entries(entries, (80, 24), None, Some(cache), Some(scanner));
 
         app.request_visible_covers(0..1);
+        wait_for_book_id(&mut app, 0);
         let before = app.book_id(0).cloned();
         assert!(before.is_some(), "root entry should resolve a book_id");
 

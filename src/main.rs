@@ -1,5 +1,6 @@
 use clap::Parser;
 use cleader::app::App;
+use cleader::cover_cache::CoverResult;
 use cleader::epub::Book;
 use cleader::input::translate;
 use cleader::persistence::Persistence;
@@ -229,11 +230,15 @@ fn library_event_loop(
             0
         };
 
-        // Drain any covers the worker finished since the last frame.
-        let had_new_covers = app
+        // Drain any covers the worker finished since the last frame and
+        // associate their resolved BookIds with the app's entries. The
+        // worker reads files and computes hashes off the UI thread.
+        let cover_results: Vec<CoverResult> = app
             .cover_cache_mut()
             .map(|c| c.drain_finished())
-            .unwrap_or(false);
+            .unwrap_or_default();
+        let had_new_covers = !cover_results.is_empty();
+        app.record_cover_results(cover_results);
 
         // Ask the cache to start generating covers for visible cells,
         // mapped through display_indices so a search filter narrows

@@ -648,12 +648,22 @@ mod tests {
         let mut cache = CoverCache::open_at(dir.path().to_path_buf());
         let id = BookId::from_bytes(b"book-a");
         // Write a deliberately-recognizable cover row to disk so the
-        // cache picks it up via enqueue (synchronous disk-hit path).
+        // worker's disk-cache hit path serves it without decoding.
         let lines: Vec<String> = (0..17)
             .map(|i| format!("ROW{i:02}{}", " ".repeat(17)))
             .collect();
         crate::cover_cache::write_cached(dir.path(), &id, &lines).unwrap();
-        cache.enqueue(id.clone(), PathBuf::from("/tmp/book-a.epub"));
+        let book = dir.path().join("book-a.epub");
+        std::fs::write(&book, b"book-a").unwrap();
+        cache.enqueue(book);
+        // Wait for the worker to hash the file, hit the disk cache, and
+        // deliver the cover into memory.
+        for _ in 0..50 {
+            if !cache.drain_finished().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         let entries = vec![lib_entry("Book A")];
         let book_ids = vec![Some(id.clone())];

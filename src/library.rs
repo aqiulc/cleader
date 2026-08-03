@@ -43,7 +43,9 @@ pub fn scan_directory_at_depth(dir: &Path, depth: usize) -> std::io::Result<Vec<
 /// [`LibraryScanner::expand`] walks only the directories that were
 /// *seen but not descended into* at the previous depth. EPUBs are
 /// therefore opened for metadata exactly once over the app's lifetime,
-/// no matter how many times the user expands.
+/// no matter how many times the user expands. Metadata extraction runs
+/// on a small thread pool so a large expand doesn't read books one at
+/// a time.
 pub struct LibraryScanner {
     root: PathBuf,
     entries: Vec<LibraryEntry>,
@@ -64,7 +66,8 @@ impl LibraryScanner {
     /// semantics as [`scan_directory_at_depth`]. Directories that were
     /// reached but not descended into become the expansion frontier.
     pub fn at_depth(root: &Path, depth: usize) -> std::io::Result<Self> {
-        let WalkResult { entries, pending_dirs } = walk_dir(root, depth)?;
+        let (epub_paths, pending_dirs) = collect_paths(root, depth)?;
+        let entries = entries_from_paths(epub_paths);
         Ok(Self {
             root: root.to_path_buf(),
             entries,
@@ -88,37 +91,36 @@ impl LibraryScanner {
     /// Descend one more level: walk the remembered frontier
     /// (`pending_dirs`), moving their EPUBs into `entries` and their
     /// subdirectories into the new frontier. Already-scanned
-    /// directories are untouched, so no EPUB is ever re-opened. A no-op
-    /// when already fully recursive (`depth == usize::MAX`).
+    /// directories are untouched, so no EPUB is ever re-opened. All
+    /// newly-found books are extracted for metadata in one parallel
+    /// pass. A no-op when already fully recursive (`depth == usize::MAX`).
     pub fn expand(&mut self) -> std::io::Result<()> {
         if self.depth == usize::MAX {
             return Ok(());
         }
         let frontier = std::mem::take(&mut self.pending_dirs);
+        let mut new_paths: Vec<PathBuf> = Vec::new();
         for dir in frontier {
-            let WalkResult { entries, pending_dirs } = walk_dir(&dir, 0)?;
-            self.entries.extend(entries);
+            let (epub_paths, pending_dirs) = collect_paths(&dir, 0)?;
+            new_paths.extend(epub_paths);
             self.pending_dirs.extend(pending_dirs);
         }
+        self.entries.extend(entries_from_paths(new_paths));
         self.entries.sort_by(|a, b| a.title.cmp(&b.title));
         self.depth = self.depth.saturating_add(1);
         Ok(())
     }
 }
 
-struct WalkResult {
-    entries: Vec<LibraryEntry>,
-    pending_dirs: Vec<PathBuf>,
-}
-
-/// Walk `root` descending up to `depth` levels. Returns the EPUBs found
-/// (sorted by title) plus the directories that were *seen* at the depth
-/// boundary but not descended into. Reads each entry's type from
-/// `read_dir` (via `DirEntry::file_type`) instead of calling
-/// `is_file()`/`is_dir()`, so every entry costs one syscall instead of
-/// two.
-fn walk_dir(root: &Path, depth: usize) -> std::io::Result<WalkResult> {
-    let mut entries: Vec<LibraryEntry> = Vec::new();
+/// Walk `root` descending up to `depth` levels and collect the paths of
+/// every `.epub` found, plus the directories that were *seen* at the
+/// depth boundary but not descended into. Directory listing only — no
+/// EPUB is opened here (metadata extraction is a separate parallel
+/// phase). Reads each entry's type from `read_dir` (via
+/// `DirEntry::file_type`) instead of calling `is_file()`/`is_dir()`,
+/// so every entry costs one syscall instead of two.
+fn collect_paths(root: &Path, depth: usize) -> std::io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let mut epub_paths: Vec<PathBuf> = Vec::new();
     let mut pending_dirs: Vec<PathBuf> = Vec::new();
     // Explicit stack keeps the walk iterative — a very deep tree must
     // not overflow the call stack. Entries are `(dir, remaining_depth)`.
@@ -132,9 +134,7 @@ fn walk_dir(root: &Path, depth: usize) -> std::io::Result<WalkResult> {
             if file_type.is_file() {
                 let path = dir_entry.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("epub") {
-                    let (title, author) = extract_metadata(&path)
-                        .unwrap_or_else(|| (title_from_file_name(&path), "Unknown".into()));
-                    entries.push(LibraryEntry { path, title, author });
+                    epub_paths.push(path);
                 }
             } else if file_type.is_dir() {
                 if remaining > 0 {
@@ -145,8 +145,60 @@ fn walk_dir(root: &Path, depth: usize) -> std::io::Result<WalkResult> {
             }
         }
     }
+    Ok((epub_paths, pending_dirs))
+}
+
+/// Extract metadata for every EPUB path, then build sorted entries.
+/// Opening an EPUB (unzipping + parsing the OPF) is the slow part of a
+/// library scan, so the extraction runs across a thread pool sized by
+/// `available_parallelism`. Files that fail extraction get filename
+/// fallbacks, matching the single-threaded behavior exactly.
+fn entries_from_paths(paths: Vec<PathBuf>) -> Vec<LibraryEntry> {
+    let metas = extract_metadata_parallel(&paths);
+    let mut entries: Vec<LibraryEntry> = paths
+        .into_iter()
+        .zip(metas)
+        .map(|(path, meta)| {
+            let (title, author) = match meta {
+                Some((title, author)) => (title, author),
+                None => (title_from_file_name(&path), "Unknown".into()),
+            };
+            LibraryEntry { path, title, author }
+        })
+        .collect();
     entries.sort_by(|a, b| a.title.cmp(&b.title));
-    Ok(WalkResult { entries, pending_dirs })
+    entries
+}
+
+/// Parallel metadata extraction. Sequential below a small threshold so
+/// tiny libraries (and tests) don't pay thread-spawn overhead.
+fn extract_metadata_parallel(paths: &[PathBuf]) -> Vec<Option<(String, String)>> {
+    if paths.len() < 8 {
+        return paths.iter().map(|p| extract_metadata(p)).collect();
+    }
+    let parallelism = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .max(1)
+        .min(paths.len());
+    let chunk_size = paths.len().div_ceil(parallelism);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = paths
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|p| extract_metadata(p))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("metadata extraction thread should not panic"))
+            .collect()
+    })
 }
 
 fn title_from_file_name(path: &Path) -> String {
