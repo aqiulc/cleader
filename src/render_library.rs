@@ -41,22 +41,51 @@ pub struct LibraryRenderInput<'a> {
     /// LibraryApp::marquee_elapsed_ms and the selected cell's title
     /// overflow.
     pub marquee_offset: usize,
-    /// Current scan depth of the library (`Some(n)` when launched from a
-    /// directory: 0 = top only, `usize::MAX` = fully recursive). `None`
-    /// when the app has no scan root, in which case no depth is shown.
-    /// Drives the "depth" label in the title bar and the `e` expand hint.
-    pub scan_depth: Option<usize>,
+    /// What to show in the title bar's depth slot. `None` when the app
+    /// has no scan root, in which case no depth is shown. Drives the
+    /// "depth" label and the `e` expand hint.
+    pub scan_depth: Option<ScanDepthLabel>,
     /// True when the help overlay should be drawn on top of everything.
     pub show_help: bool,
 }
 
+/// Value rendered in the title bar's depth slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanDepthLabel {
+    /// Scanned to depth `n` (0 = root directory only).
+    At(usize),
+    /// `usize::MAX` — every subdirectory has been scanned.
+    Recursive,
+    /// A deeper scan is in progress; books are still being loaded.
+    Scanning,
+}
+
+impl ScanDepthLabel {
+    /// Map the app's scan-depth getter onto a display label. While
+    /// `scanning` is set the label is the loading ellipsis regardless
+    /// of the numeric depth.
+    pub fn from_depth(depth: Option<usize>, scanning: bool) -> Option<ScanDepthLabel> {
+        if scanning {
+            return Some(ScanDepthLabel::Scanning);
+        }
+        depth.map(|d| {
+            if d == usize::MAX {
+                ScanDepthLabel::Recursive
+            } else {
+                ScanDepthLabel::At(d)
+            }
+        })
+    }
+}
+
 /// Title-bar suffix describing the current scan depth. Empty when the
 /// library has no scan root (depth isn't tracked or expandable).
-fn depth_label(depth: Option<usize>) -> String {
+fn depth_label(depth: Option<ScanDepthLabel>) -> String {
     match depth {
         None => String::new(),
-        Some(usize::MAX) => " · recursive ".to_string(),
-        Some(n) => format!(" · depth {n} "),
+        Some(ScanDepthLabel::Scanning) => " · ... ".to_string(),
+        Some(ScanDepthLabel::Recursive) => " · recursive ".to_string(),
+        Some(ScanDepthLabel::At(n)) => format!(" · depth {n} "),
     }
 }
 
@@ -487,6 +516,36 @@ mod tests {
             title: title.to_string(),
             author: "Anon".to_string(),
         }
+    }
+
+    #[test]
+    fn scan_depth_label_maps_depths_and_scanning() {
+        assert_eq!(ScanDepthLabel::from_depth(None, false), None);
+        assert_eq!(
+            ScanDepthLabel::from_depth(Some(0), false),
+            Some(ScanDepthLabel::At(0))
+        );
+        assert_eq!(
+            ScanDepthLabel::from_depth(Some(usize::MAX), false),
+            Some(ScanDepthLabel::Recursive)
+        );
+        // Scanning overrides whatever the numeric depth is.
+        assert_eq!(
+            ScanDepthLabel::from_depth(Some(3), true),
+            Some(ScanDepthLabel::Scanning)
+        );
+        assert_eq!(
+            ScanDepthLabel::from_depth(None, true),
+            Some(ScanDepthLabel::Scanning)
+        );
+    }
+
+    #[test]
+    fn depth_label_renders_ellipsis_while_scanning() {
+        assert_eq!(depth_label(None), "");
+        assert_eq!(depth_label(Some(ScanDepthLabel::At(2))), " · depth 2 ");
+        assert_eq!(depth_label(Some(ScanDepthLabel::Recursive)), " · recursive ");
+        assert_eq!(depth_label(Some(ScanDepthLabel::Scanning)), " · ... ");
     }
 
     #[test]

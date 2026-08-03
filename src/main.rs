@@ -265,50 +265,7 @@ fn library_event_loop(
             cleader::library_app::marquee_offset(app.marquee_elapsed_ms(), selected_overflow);
 
         if needs_redraw || had_new_covers {
-            // Bind shared borrows of app fields into local refs. The
-            // draw closure captures these by reference; ratatui's
-            // terminal.draw takes FnOnce, so the borrows live for
-            // exactly one frame. Plain primitives (selection,
-            // view_mode, search_mode, show_help) are Copy.
-            let entries = app.entries();
-            let book_ids = app.book_ids();
-            let display_indices = app.display_indices();
-            let cover_cache = app.cover_cache();
-            let warning = app.save_error();
-            let selection = app.selection();
-            let view_mode = app.view_mode();
-            let search_mode = app.search_mode();
-            let show_help = app.show_help();
-            let search_query: Option<&str> = if matches!(
-                search_mode,
-                cleader::search::SearchMode::Idle
-            ) {
-                None
-            } else {
-                Some(app.search_query())
-            };
-
-            terminal.draw(|frame| {
-                let area = frame.area();
-                cleader::render_library::render_library(
-                    frame,
-                    area,
-                    cleader::render_library::LibraryRenderInput {
-                        entries,
-                        selection,
-                        view_mode,
-                        cover_cache,
-                        book_ids,
-                        warning,
-                        display_indices,
-                        search_query,
-                        search_mode,
-                        marquee_offset: marquee_offset_val,
-                        scan_depth: app.scan_depth(),
-                        show_help,
-                    },
-                );
-            })?;
+            draw_library_frame(terminal, app, marquee_offset_val)?;
             needs_redraw = false;
         }
 
@@ -347,7 +304,21 @@ fn library_event_loop(
                     _ => {}
                 }
             } else if let Some(action) = translate(evt) {
-                app.handle(action);
+                if action == cleader::input::Action::ExpandScanDepth {
+                    // Deeper scans can take a while (opening each EPUB
+                    // for metadata). Draw a frame showing the loading
+                    // ellipsis BEFORE the blocking expand runs, so the
+                    // user gets immediate feedback instead of a frozen
+                    // screen. Skip when the scan is already recursive.
+                    if matches!(app.scan_depth(), Some(d) if d != usize::MAX) {
+                        app.set_scanning(true);
+                        draw_library_frame(terminal, app, marquee_offset_val)?;
+                    }
+                    app.handle(action);
+                    app.set_scanning(false);
+                } else {
+                    app.handle(action);
+                }
                 needs_redraw = true;
             }
         }
@@ -358,5 +329,62 @@ fn library_event_loop(
             needs_redraw = true;
         }
     }
+    Ok(())
+}
+
+/// Render one frame of the library view. Extracted so the event loop
+/// can also draw "scanning…" feedback *between* key handling and the
+/// blocking `expand_scan_depth` call.
+fn draw_library_frame(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &cleader::library_app::LibraryApp,
+    marquee_offset_val: usize,
+) -> anyhow::Result<()> {
+    // Bind shared borrows of app fields into local refs. The draw
+    // closure captures these by reference; ratatui's terminal.draw
+    // takes FnOnce, so the borrows live for exactly one frame. Plain
+    // primitives (selection, view_mode, search_mode, show_help) are
+    // Copy.
+    let entries = app.entries();
+    let book_ids = app.book_ids();
+    let display_indices = app.display_indices();
+    let cover_cache = app.cover_cache();
+    let warning = app.save_error();
+    let selection = app.selection();
+    let view_mode = app.view_mode();
+    let search_mode = app.search_mode();
+    let show_help = app.show_help();
+    let search_query: Option<&str> = if matches!(
+        search_mode,
+        cleader::search::SearchMode::Idle
+    ) {
+        None
+    } else {
+        Some(app.search_query())
+    };
+    terminal.draw(|frame| {
+        let area = frame.area();
+        cleader::render_library::render_library(
+            frame,
+            area,
+            cleader::render_library::LibraryRenderInput {
+                entries,
+                selection,
+                view_mode,
+                cover_cache,
+                book_ids,
+                warning,
+                display_indices,
+                search_query,
+                search_mode,
+                marquee_offset: marquee_offset_val,
+                scan_depth: cleader::render_library::ScanDepthLabel::from_depth(
+                    app.scan_depth(),
+                    app.scanning(),
+                ),
+                show_help,
+            },
+        );
+    })?;
     Ok(())
 }

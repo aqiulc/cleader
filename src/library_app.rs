@@ -101,6 +101,11 @@ pub struct LibraryApp {
     /// walks only new folders and never re-reads metadata for books it
     /// has already seen.
     scanner: Option<LibraryScanner>,
+    /// True while a deeper directory scan is blocking the event loop.
+    /// The renderer swaps the depth label for a "..." ellipsis while
+    /// this is set. Managed by the library event loop around
+    /// `expand_scan_depth`.
+    scanning: bool,
 }
 
 impl LibraryApp {
@@ -169,6 +174,7 @@ impl LibraryApp {
             marquee_start: Some(Instant::now()),
             show_help: false,
             scanner,
+            scanning: false,
         }
     }
 
@@ -253,6 +259,18 @@ impl LibraryApp {
     /// can't be expanded.
     pub fn scan_depth(&self) -> Option<usize> {
         self.scanner.as_ref().map(|s| s.depth())
+    }
+
+    /// Set whether a deeper scan is currently blocking the event loop.
+    /// The library event loop flips this on just before the blocking
+    /// `expand_scan_depth` call (and off right after) so the renderer
+    /// can show a loading ellipsis in the depth slot.
+    pub fn set_scanning(&mut self, scanning: bool) {
+        self.scanning = scanning;
+    }
+
+    pub fn scanning(&self) -> bool {
+        self.scanning
     }
 
     /// Rescan one level deeper and swap in the results. Only the
