@@ -1,4 +1,4 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -30,6 +30,26 @@ fn translate_key(key: KeyEvent) -> Option<Action> {
     use KeyCode::*;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+    // On Windows the console reports both a key-down and a key-up record
+    // per physical press, which crossterm surfaces as `Press` followed by
+    // `Release` events. Acting on both would fire every action twice, so
+    // only react to genuine presses. (Reader-only bindings are all
+    // press-triggered; holding a key to repeat is handled by the OS's
+    // autorepeat, which Windows reports with `key_down` set.)
+    //
+    // On Unix this is effectively a no-op for normal terminals: crossterm
+    // parses ANSI sequences and always reports `KeyEventKind::Press`
+    // there. The one caveat is the Kitty keyboard protocol: if it were
+    // enabled, crossterm reports held-key autorepeat as
+    // `KeyEventKind::Repeat` (and key releases as `Release`), both of
+    // which this guard drops — so a held key would NOT auto-scroll. We
+    // never enable the Kitty protocol (cleader has no reason to), so this
+    // path is unreachable today; if it's ever enabled, Repeat would need
+    // explicit handling to restore hold-to-scroll.
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
 
     match (key.code, ctrl, shift) {
         // Ctrl+C quits (SIGINT analog). Ctrl+Q is XON in many terminals,
@@ -85,6 +105,43 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         })
+    }
+
+    fn key_release(code: KeyCode) -> Event {
+        Event::Key(KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        })
+    }
+
+    #[test]
+    fn release_events_are_ignored() {
+        // The Windows console (incl. the ConPTY used by Git Bash/mintty)
+        // reports a key-up record for every key-down. crossterm surfaces
+        // these as KeyEventKind::Release; they must not trigger actions,
+        // or every physical press fires twice.
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('h'),
+            KeyCode::Char('l'),
+            KeyCode::Char(' '),
+            KeyCode::Char('n'),
+            KeyCode::Char('N'),
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
+            assert_eq!(
+                translate(key_release(code)),
+                None,
+                "Release event for {code:?} must not map to an action"
+            );
+        }
     }
 
     #[test]
