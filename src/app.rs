@@ -11,6 +11,19 @@ use ratatui::text::Line;
 /// coarse-grained nav.
 const TOC_PAGE_STEP_MAX: usize = 10;
 
+/// Body-text width mode. Session-scoped (not persisted).
+///
+/// - `Capped`: text wraps at `min(terminal_width, --width)`, the
+///   classic default (80 columns unless the user passed `--width`).
+/// - `Full`: text uses the whole terminal width (`--width` ignored),
+///   for users who prefer a dense, page-filling line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WidthMode {
+    #[default]
+    Capped,
+    Full,
+}
+
 pub struct App {
     book: Book,
     chapter_idx: usize,
@@ -39,9 +52,15 @@ pub struct App {
     /// starts with their current chapter highlighted.
     toc_selection: usize,
     /// User-configured body text width cap (from `--width`). Stored so
-    /// that re-wraps (load_chapter, resize) keep using the user's
-    /// chosen value rather than reverting to the built-in default.
+    /// that re-wraps (load_chapter, resize, width toggle) keep using the
+    /// user's chosen value rather than reverting to the built-in
+    /// default. The cap that actually drives wrapping is
+    /// `effective_max_body_width()`, which substitutes `u16::MAX` when
+    /// the current width mode is `Full`.
     max_body_width: u16,
+    /// Current body-width mode (see `WidthMode`). Defaults to `Capped`
+    /// so the first run behaves exactly like the pre-toggle reader.
+    width_mode: WidthMode,
 }
 
 impl App {
@@ -74,17 +93,24 @@ impl App {
             }
         }
 
-        let (chapter_idx, line_offset) = match persistence.get(&key) {
+        let (chapter_idx, line_offset, source_offset) = match persistence.get(&key) {
             Some(p) if (p.chapter_idx as usize) < book.chapters.len() => {
-                (p.chapter_idx as usize, p.line_offset as usize)
+                (
+                    p.chapter_idx as usize,
+                    p.line_offset as usize,
+                    p.source_offset.map(|o| o as usize),
+                )
             }
-            _ => (0, 0),
+            _ => (0, 0, None),
         };
         let wrapped = wrap_chapter(
             &book.chapters[chapter_idx].blocks,
             body_text_width(viewport.0, max_body_width),
         );
-        let line_offset = line_offset.min(wrapped.len().saturating_sub(1));
+        let line_offset = match source_offset {
+            Some(src) => wrapped.find_line_for_source(src).unwrap_or(0),
+            None => line_offset.min(wrapped.len().saturating_sub(1)),
+        };
         Self {
             book,
             chapter_idx,
@@ -98,6 +124,7 @@ impl App {
             show_toc: false,
             toc_selection: 0,
             max_body_width,
+            width_mode: WidthMode::Capped,
         }
     }
 
@@ -155,10 +182,27 @@ impl App {
         self.toc_selection
     }
 
-    /// User-configured body text width cap. Reflects the value passed
-    /// to `App::new` (typically from the `--width` CLI flag).
+    /// Effective body-width cap for the current width mode: the user's
+    /// `--width` value when `Capped`, unlimited when `Full`. This is
+    /// what feeds `body_text_width` (wrapping) and the renderer (centered
+    /// body column). Returns the value passed to `App::new` while in
+    /// `Capped` mode, so existing callers that expected the raw cap are
+    /// unaffected unless the user has toggled to Full.
     pub fn max_body_width(&self) -> u16 {
-        self.max_body_width
+        self.effective_max_body_width()
+    }
+
+    fn effective_max_body_width(&self) -> u16 {
+        match self.width_mode {
+            WidthMode::Capped => self.max_body_width,
+            WidthMode::Full => u16::MAX,
+        }
+    }
+
+    /// Current body-width mode. `Capped` = wrap at `--width`; `Full` =
+    /// use the whole terminal width. Session-scoped.
+    pub fn width_mode(&self) -> WidthMode {
+        self.width_mode
     }
 
     fn lines_per_page(&self) -> usize {
@@ -201,7 +245,7 @@ impl App {
         self.chapter_idx = idx;
         self.wrapped = wrap_chapter(
             &self.book.chapters[idx].blocks,
-            body_text_width(self.viewport_size.0, self.max_body_width),
+            body_text_width(self.viewport_size.0, self.effective_max_body_width()),
         );
         self.line_offset = line_offset.min(self.wrapped.len().saturating_sub(1));
     }
@@ -212,6 +256,11 @@ impl App {
             author: self.book.author.clone(),
             chapter_idx: self.chapter_idx as u32,
             line_offset: self.line_offset as u32,
+            // Persist the source-char offset of the visible top line, not
+            // just the raw wrapped-line index. The wrapped index depends
+            // on terminal width; the source offset re-anchors correctly
+            // across width changes on restore (see App::new).
+            source_offset: Some(self.wrapped_source_offset_at_top() as u32),
             last_read: Utc::now(),
         }
     }
@@ -270,11 +319,14 @@ impl App {
                 }
                 Action::Quit => self.show_toc = false,
                 Action::Resize(w, h) => self.resize(w, h),
-                Action::ChapterNext | Action::ChapterPrev | Action::ToggleViewMode | Action::OpenSearch => {
+                Action::ChapterNext | Action::ChapterPrev | Action::ToggleViewMode | Action::OpenSearch | Action::ToggleWidthMode => {
                     // Chapter nav while TOC is up is ambiguous — the user
                     // probably wanted TOC selection nav. Treat as no-op.
                     // ToggleViewMode is always a no-op in reader mode (library-only action).
                     // OpenSearch is always a no-op in reader mode (library-only action).
+                    // ToggleWidthMode while TOC is up would rewrap the
+                    // hidden body behind the overlay — defer to when the
+                    // TOC is dismissed.
                 }
             }
             return;
@@ -300,6 +352,7 @@ impl App {
                 self.save();
             }
             Action::Resize(w, h) => self.resize(w, h),
+            Action::ToggleWidthMode => self.toggle_width_mode(),
             Action::ToggleHelp => {
                 self.show_help = !self.show_help;
             }
@@ -424,17 +477,36 @@ impl App {
         if width_changed {
             // Save the source-char offset of the currently-visible top line
             // so we can land on the same content after rewrap.
-            let target_source = self.wrapped_source_offset_at_top();
-            self.wrapped = wrap_chapter(
-                &self.book.chapters[self.chapter_idx].blocks,
-                body_text_width(self.viewport_size.0, self.max_body_width),
-            );
-            self.line_offset = self
-                .wrapped
-                .find_line_for_source(target_source)
-                .unwrap_or(0)
-                .min(self.wrapped.len().saturating_sub(1));
+            self.rewrap_preserving_position();
         }
+    }
+
+    /// Toggle between `Capped` and `Full` width modes, re-wrapping the
+    /// current chapter so the visible top line stays at the same source
+    /// position. Mirrors the resize re-wrap path.
+    fn toggle_width_mode(&mut self) {
+        self.width_mode = match self.width_mode {
+            WidthMode::Capped => WidthMode::Full,
+            WidthMode::Full => WidthMode::Capped,
+        };
+        self.rewrap_preserving_position();
+    }
+
+    /// Re-wrap the current chapter at the current width, then restore
+    /// the viewport's top line to the same source position (clamped to
+    /// the chapter). Used by resize (width change) and the width-mode
+    /// toggle.
+    fn rewrap_preserving_position(&mut self) {
+        let target_source = self.wrapped_source_offset_at_top();
+        self.wrapped = wrap_chapter(
+            &self.book.chapters[self.chapter_idx].blocks,
+            body_text_width(self.viewport_size.0, self.effective_max_body_width()),
+        );
+        self.line_offset = self
+            .wrapped
+            .find_line_for_source(target_source)
+            .unwrap_or(0)
+            .min(self.wrapped.len().saturating_sub(1));
     }
 }
 
@@ -526,6 +598,7 @@ mod tests {
                     author: "A".into(),
                     chapter_idx: 1,
                     line_offset: 0,
+                    source_offset: None,
                     last_read: Utc::now(),
                 },
             );
@@ -550,8 +623,9 @@ mod tests {
                 Position {
                     title: "T".into(),
                     author: "A".into(),
-                    chapter_idx: 99,
-                    line_offset: 50,
+                    chapter_idx: 1,
+                    line_offset: 0,
+                    source_offset: None,
                     last_read: Utc::now(),
                 },
             );
@@ -577,8 +651,9 @@ mod tests {
                 Position {
                     title: "T".into(),
                     author: "A".into(),
-                    chapter_idx: 0,
-                    line_offset: 9999,
+                    chapter_idx: 99,
+                    line_offset: 50,
+                    source_offset: None,
                     last_read: Utc::now(),
                 },
             );
@@ -877,6 +952,7 @@ mod tests {
                     author: "A".into(),
                     chapter_idx: 1,
                     line_offset: 0,
+                    source_offset: None,
                     last_read: Utc::now(),
                 },
             );
@@ -919,7 +995,8 @@ mod tests {
                     title: "T".into(),
                     author: "A".into(),
                     chapter_idx: 0,
-                    line_offset: 0,
+                    line_offset: 9999,
+                    source_offset: None,
                     last_read: Utc::now(),
                 },
             );
@@ -931,6 +1008,7 @@ mod tests {
                     author: "A".into(),
                     chapter_idx: 2,
                     line_offset: 0,
+                    source_offset: None,
                     last_read: Utc::now(),
                 },
             );
@@ -1118,5 +1196,124 @@ mod tests {
         let mut app = App::new(book, p_handle, (200, 24), 100);
         app.handle(Action::Resize(150, 24));
         assert_eq!(app.max_body_width(), 100);
+    }
+
+    fn long_paragraph_block() -> Vec<Block> {
+        // ~740 chars per paragraph, so it wraps to several lines at any
+        // sensible width (5 paras × ~11 lines at 77 cols).
+        let text = "the quick brown fox jumps over the lazy dog repeatedly today and tomorrow "
+            .repeat(10);
+        vec![p(&text); 5]
+    }
+
+    #[test]
+    fn new_app_defaults_to_capped_width_mode() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![long_paragraph_block()]);
+        let app = App::new(book, p_handle, (200, 40), TEST_WIDTH);
+        assert_eq!(app.width_mode(), WidthMode::Capped);
+        assert_eq!(app.max_body_width(), TEST_WIDTH);
+    }
+
+    #[test]
+    fn toggle_width_mode_flips_between_capped_and_full() {
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![long_paragraph_block()]);
+        let mut app = App::new(book, p_handle, (200, 40), 100); // custom --width 100
+        assert_eq!(app.width_mode(), WidthMode::Capped);
+        assert_eq!(app.max_body_width(), 100);
+        app.handle(Action::ToggleWidthMode);
+        assert_eq!(app.width_mode(), WidthMode::Full);
+        assert_eq!(app.max_body_width(), u16::MAX);
+        app.handle(Action::ToggleWidthMode);
+        assert_eq!(app.width_mode(), WidthMode::Capped);
+        assert_eq!(app.max_body_width(), 100);
+    }
+
+    #[test]
+    fn toggle_width_mode_rewraps_and_preserves_position() {
+        // On a 200-col terminal, Capped(80) wraps at 77 cols and Full
+        // wraps at 197 — a long paragraph yields visibly fewer lines.
+        // Toggling must keep the viewport's top line at the same source
+        // position (mirroring the resize re-wrap path).
+        let (p_handle, _dir) = fresh_persistence();
+        let book = book_with_chapters(vec![long_paragraph_block()]);
+        let mut app = App::new(book, p_handle, (200, 40), TEST_WIDTH);
+        app.handle(Action::PageNext);
+        let lines_capped = app.wrapped().len();
+        let pre_source = app.wrapped_source_offset_at_top();
+        app.handle(Action::ToggleWidthMode);
+        let lines_full = app.wrapped().len();
+        let post_source = app.wrapped_source_offset_at_top();
+        assert!(
+            lines_full < lines_capped,
+            "full width should wrap to fewer lines ({lines_full} vs {lines_capped})"
+        );
+        assert!(
+            post_source <= pre_source,
+            "post-toggle top should be at or before saved source ({post_source} > {pre_source})"
+        );
+        assert!(
+            pre_source - post_source < 100,
+            "post-toggle top drifted too far ({} chars before)",
+            pre_source - post_source
+        );
+        assert_eq!(app.width_mode(), WidthMode::Full);
+    }
+
+    #[test]
+    fn save_writes_source_offset_for_reanchoring() {
+        // Saving must record the source-char offset of the visible top
+        // line alongside the raw wrapped-line index.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let book = book_with_chapters(vec![long_paragraph_block()]);
+        let key = book.registry_key();
+        let mut app = App::new(book, Persistence::open_at(path.clone()), (200, 40), TEST_WIDTH);
+        app.handle(Action::PageNext);
+        let expected = app.wrapped_source_offset_at_top();
+        assert!(expected > 0, "test needs a non-trivial scroll position");
+        app.handle(Action::Quit); // flushes the position
+        let reopened = Persistence::open_at(path);
+        let pos = reopened.get(&key).expect("position saved");
+        assert_eq!(pos.source_offset, Some(expected as u32));
+        assert!(pos.line_offset > 0);
+    }
+
+    #[test]
+    fn restore_reanchors_by_source_offset_across_widths() {
+        // Bug 4: the persisted wrapped-line index depends on terminal
+        // width. Save at 200 cols (wrap 77), restore at 40 cols (wrap
+        // 37): restore must re-anchor by the saved source offset instead
+        // of clamping the stale line index (which drifts by paragraphs).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let book = book_with_chapters(vec![long_paragraph_block()]);
+        let key = book.registry_key();
+
+        // Session 1: read mid-chapter at 200 cols.
+        {
+            let mut app =
+                App::new(book.clone(), Persistence::open_at(path.clone()), (200, 40), TEST_WIDTH);
+            app.handle(Action::PageNext);
+            app.handle(Action::Quit);
+        }
+
+        let saved_source = Persistence::open_at(path.clone())
+            .get(&key)
+            .and_then(|p| p.source_offset)
+            .expect("saved source offset") as usize;
+
+        // Session 2: reopen at a different width.
+        let app = App::new(book, Persistence::open_at(path), (40, 40), TEST_WIDTH);
+        let restored_source = app.wrapped_source_offset_at_top();
+        assert!(
+            restored_source <= saved_source,
+            "restore should land at or before the saved source ({restored_source} > {saved_source})"
+        );
+        assert!(
+            saved_source - restored_source < 100,
+            "restore drifted too far from the saved source ({saved_source} vs {restored_source})"
+        );
     }
 }
