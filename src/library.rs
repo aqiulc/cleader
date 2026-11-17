@@ -20,28 +20,191 @@ pub struct LibraryEntry {
 /// Files that fail metadata extraction get filename-based fallbacks
 /// (title from file stem, author "Unknown").
 pub fn scan_directory(dir: &Path) -> std::io::Result<Vec<LibraryEntry>> {
-    let read = std::fs::read_dir(dir)?;
-    let mut entries: Vec<LibraryEntry> = Vec::new();
-    for dir_entry in read.flatten() {
-        let path = dir_entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if path.extension().and_then(|s| s.to_str()) != Some("epub") {
-            continue;
-        }
-        let (title, author) = extract_metadata(&path).unwrap_or_else(|| {
-            (
-                path.file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "Untitled".into()),
-                "Unknown".into(),
-            )
-        });
-        entries.push(LibraryEntry { path, title, author });
+    scan_directory_at_depth(dir, 0)
+}
+
+/// Scan a directory for `.epub` files, descending up to `depth` levels
+/// of subdirectories. `depth == 0` scans the given directory only (no
+/// recursion); `depth == 1` also includes its immediate subdirectories;
+/// `usize::MAX` scans the whole tree recursively. Deeper books keep
+/// their full path, so opening a result works unchanged regardless of
+/// depth. Sort and metadata-fallback behavior match `scan_directory`.
+///
+/// Convenience wrapper around [`LibraryScanner::at_depth`]. Apps that
+/// expand the scan depth incrementally should use [`LibraryScanner`]
+/// directly so already-walked directories and already-read metadata are
+/// reused instead of rescanned from the root each time.
+pub fn scan_directory_at_depth(dir: &Path, depth: usize) -> std::io::Result<Vec<LibraryEntry>> {
+    Ok(LibraryScanner::at_depth(dir, depth)?.entries)
+}
+
+/// Incremental library scanner. Walks each directory exactly once: the
+/// initial scan reads the root (down to `depth` levels), and each
+/// [`LibraryScanner::expand`] walks only the directories that were
+/// *seen but not descended into* at the previous depth. EPUBs are
+/// therefore opened for metadata exactly once over the app's lifetime,
+/// no matter how many times the user expands. Metadata extraction runs
+/// on a small thread pool so a large expand doesn't read books one at
+/// a time.
+pub struct LibraryScanner {
+    root: PathBuf,
+    entries: Vec<LibraryEntry>,
+    /// Directories at the current depth boundary — seen but not yet
+    /// descended into. The next `expand` walks exactly these.
+    pending_dirs: Vec<PathBuf>,
+    depth: usize,
+}
+
+impl LibraryScanner {
+    /// Scan `root` at depth 0 (the directory itself only). `expand`
+    /// then descends one level at a time.
+    pub fn new(root: &Path) -> std::io::Result<Self> {
+        Self::at_depth(root, 0)
     }
+
+    /// Scan `root` descending up to `depth` levels, with the same depth
+    /// semantics as [`scan_directory_at_depth`]. Directories that were
+    /// reached but not descended into become the expansion frontier.
+    pub fn at_depth(root: &Path, depth: usize) -> std::io::Result<Self> {
+        let (epub_paths, pending_dirs) = collect_paths(root, depth)?;
+        let entries = entries_from_paths(epub_paths);
+        Ok(Self {
+            root: root.to_path_buf(),
+            entries,
+            pending_dirs,
+            depth,
+        })
+    }
+
+    pub fn entries(&self) -> &[LibraryEntry] {
+        &self.entries
+    }
+
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Descend one more level: walk the remembered frontier
+    /// (`pending_dirs`), moving their EPUBs into `entries` and their
+    /// subdirectories into the new frontier. Already-scanned
+    /// directories are untouched, so no EPUB is ever re-opened. All
+    /// newly-found books are extracted for metadata in one parallel
+    /// pass. A no-op when already fully recursive (`depth == usize::MAX`).
+    pub fn expand(&mut self) -> std::io::Result<()> {
+        if self.depth == usize::MAX {
+            return Ok(());
+        }
+        let frontier = std::mem::take(&mut self.pending_dirs);
+        let mut new_paths: Vec<PathBuf> = Vec::new();
+        for dir in frontier {
+            let (epub_paths, pending_dirs) = collect_paths(&dir, 0)?;
+            new_paths.extend(epub_paths);
+            self.pending_dirs.extend(pending_dirs);
+        }
+        self.entries.extend(entries_from_paths(new_paths));
+        self.entries.sort_by(|a, b| a.title.cmp(&b.title));
+        self.depth = self.depth.saturating_add(1);
+        Ok(())
+    }
+}
+
+/// Walk `root` descending up to `depth` levels and collect the paths of
+/// every `.epub` found, plus the directories that were *seen* at the
+/// depth boundary but not descended into. Directory listing only — no
+/// EPUB is opened here (metadata extraction is a separate parallel
+/// phase). Reads each entry's type from `read_dir` (via
+/// `DirEntry::file_type`) instead of calling `is_file()`/`is_dir()`,
+/// so every entry costs one syscall instead of two.
+fn collect_paths(root: &Path, depth: usize) -> std::io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let mut epub_paths: Vec<PathBuf> = Vec::new();
+    let mut pending_dirs: Vec<PathBuf> = Vec::new();
+    // Explicit stack keeps the walk iterative — a very deep tree must
+    // not overflow the call stack. Entries are `(dir, remaining_depth)`.
+    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), depth)];
+    while let Some((current, remaining)) = stack.pop() {
+        let read = std::fs::read_dir(&current)?;
+        for dir_entry in read.flatten() {
+            let Ok(file_type) = dir_entry.file_type() else {
+                continue;
+            };
+            if file_type.is_file() {
+                let path = dir_entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("epub") {
+                    epub_paths.push(path);
+                }
+            } else if file_type.is_dir() {
+                if remaining > 0 {
+                    stack.push((dir_entry.path(), remaining - 1));
+                } else {
+                    pending_dirs.push(dir_entry.path());
+                }
+            }
+        }
+    }
+    Ok((epub_paths, pending_dirs))
+}
+
+/// Extract metadata for every EPUB path, then build sorted entries.
+/// Opening an EPUB (unzipping + parsing the OPF) is the slow part of a
+/// library scan, so the extraction runs across a thread pool sized by
+/// `available_parallelism`. Files that fail extraction get filename
+/// fallbacks, matching the single-threaded behavior exactly.
+fn entries_from_paths(paths: Vec<PathBuf>) -> Vec<LibraryEntry> {
+    let metas = extract_metadata_parallel(&paths);
+    let mut entries: Vec<LibraryEntry> = paths
+        .into_iter()
+        .zip(metas)
+        .map(|(path, meta)| {
+            let (title, author) = match meta {
+                Some((title, author)) => (title, author),
+                None => (title_from_file_name(&path), "Unknown".into()),
+            };
+            LibraryEntry { path, title, author }
+        })
+        .collect();
     entries.sort_by(|a, b| a.title.cmp(&b.title));
-    Ok(entries)
+    entries
+}
+
+/// Parallel metadata extraction. Sequential below a small threshold so
+/// tiny libraries (and tests) don't pay thread-spawn overhead.
+fn extract_metadata_parallel(paths: &[PathBuf]) -> Vec<Option<(String, String)>> {
+    if paths.len() < 8 {
+        return paths.iter().map(|p| extract_metadata(p)).collect();
+    }
+    let parallelism = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .max(1)
+        .min(paths.len());
+    let chunk_size = paths.len().div_ceil(parallelism);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = paths
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|p| extract_metadata(p))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("metadata extraction thread should not panic"))
+            .collect()
+    })
+}
+
+fn title_from_file_name(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Untitled".into())
 }
 
 /// Open the EPUB just long enough to read Dublin Core title/creator.
@@ -104,5 +267,156 @@ mod tests {
         let entries = scan_directory(dir.path()).unwrap();
         let titles: Vec<&str> = entries.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, vec!["alpha", "mu", "zeta"]);
+    }
+
+    #[test]
+    fn scan_depth_zero_does_not_recurse() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("top.epub"), "x").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/nested.epub"), "x").unwrap();
+        let entries = scan_directory(dir.path()).unwrap();
+        let stems: Vec<String> = entries
+            .iter()
+            .map(|e| e.path.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(stems, vec!["top"], "depth 0 must not find nested books");
+    }
+
+    #[test]
+    fn scan_depth_one_includes_immediate_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("top.epub"), "x").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/child.epub"), "x").unwrap();
+        fs::create_dir(dir.path().join("sub/deep")).unwrap();
+        fs::write(dir.path().join("sub/deep/grandchild.epub"), "x").unwrap();
+        let entries = scan_directory_at_depth(dir.path(), 1).unwrap();
+        let stems: Vec<String> = entries
+            .iter()
+            .map(|e| e.path.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            stems,
+            vec!["child", "top"],
+            "depth 1 must find direct children but not grandchildren"
+        );
+    }
+
+    #[test]
+    fn scan_depth_two_includes_grandchildren() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("top.epub"), "x").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/child.epub"), "x").unwrap();
+        fs::create_dir(dir.path().join("sub/deep")).unwrap();
+        fs::write(dir.path().join("sub/deep/grandchild.epub"), "x").unwrap();
+        let entries = scan_directory_at_depth(dir.path(), 2).unwrap();
+        let stems: Vec<String> = entries
+            .iter()
+            .map(|e| e.path.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            stems,
+            vec!["child", "grandchild", "top"],
+            "depth 2 must reach grandchildren"
+        );
+    }
+
+    #[test]
+    fn scan_recursive_finds_all_nested_books() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("top.epub"), "x").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/child.epub"), "x").unwrap();
+        fs::create_dir(dir.path().join("sub/deep")).unwrap();
+        fs::write(dir.path().join("sub/deep/grandchild.epub"), "x").unwrap();
+        let entries = scan_directory_at_depth(dir.path(), usize::MAX).unwrap();
+        let stems: Vec<String> = entries
+            .iter()
+            .map(|e| e.path.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(stems, vec!["child", "grandchild", "top"]);
+    }
+
+    #[test]
+    fn scan_depth_keeps_full_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/book.epub"), "x").unwrap();
+        let entries = scan_directory_at_depth(dir.path(), usize::MAX).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0].path.ends_with("sub/book.epub"),
+            "nested entry must keep its full path, got {:?}",
+            entries[0].path
+        );
+    }
+
+    fn stems(scanner: &LibraryScanner) -> Vec<String> {
+        scanner
+            .entries()
+            .iter()
+            .map(|e| e.path.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn scanner_expand_discovers_one_level_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("top.epub"), "x").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/child.epub"), "x").unwrap();
+        fs::create_dir(dir.path().join("sub/deep")).unwrap();
+        fs::write(dir.path().join("sub/deep/grandchild.epub"), "x").unwrap();
+
+        let mut scanner = LibraryScanner::new(dir.path()).unwrap();
+        assert_eq!(scanner.depth(), 0);
+        assert_eq!(stems(&scanner), vec!["top"]);
+
+        scanner.expand().unwrap();
+        assert_eq!(scanner.depth(), 1);
+        assert_eq!(stems(&scanner), vec!["child", "top"]);
+
+        scanner.expand().unwrap();
+        assert_eq!(scanner.depth(), 2);
+        assert_eq!(stems(&scanner), vec!["child", "grandchild", "top"]);
+
+        scanner.expand().unwrap();
+        let len = scanner.entries().len();
+        scanner.expand().unwrap();
+        assert_eq!(
+            scanner.entries().len(),
+            len,
+            "fully-scanned frontier expands without adding books"
+        );
+    }
+
+    #[test]
+    fn scanner_at_depth_matches_scan_directory_at_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("top.epub"), "x").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/child.epub"), "x").unwrap();
+        fs::create_dir(dir.path().join("sub/deep")).unwrap();
+        fs::write(dir.path().join("sub/deep/grandchild.epub"), "x").unwrap();
+
+        for depth in 0..=3 {
+            let scanner = LibraryScanner::at_depth(dir.path(), depth).unwrap();
+            let entries = scan_directory_at_depth(dir.path(), depth).unwrap();
+            assert_eq!(
+                scanner.entries().len(),
+                entries.len(),
+                "depth {depth} must agree with the one-shot scan"
+            );
+            assert_eq!(stems(&scanner), stems_of(&entries));
+        }
+    }
+
+    fn stems_of(entries: &[LibraryEntry]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|e| e.path.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect()
     }
 }

@@ -15,6 +15,9 @@ pub enum Action {
     OpenSearch,
     Confirm,
     Quit,
+    /// Library-mode only: deepen the directory scan by one subfolder
+    /// level. No-op in reader mode.
+    ExpandScanDepth,
     Resize(u16, u16),
 }
 
@@ -57,6 +60,7 @@ fn translate_key(key: KeyEvent) -> Option<Action> {
 
         (Char('t'), false, false) => Some(Action::ToggleToc),
         (Char('g'), false, false) => Some(Action::ToggleViewMode),
+        (Char('e'), false, false) => Some(Action::ExpandScanDepth),
         (Char('/'), false, _) => Some(Action::OpenSearch),
         (Enter, _, _) => Some(Action::Confirm),
 
@@ -146,6 +150,14 @@ mod tests {
     #[test]
     fn t_toggles_toc() {
         assert_eq!(translate(key(KeyCode::Char('t'))), Some(Action::ToggleToc));
+    }
+
+    #[test]
+    fn e_expands_scan_depth() {
+        assert_eq!(
+            translate(key(KeyCode::Char('e'))),
+            Some(Action::ExpandScanDepth)
+        );
     }
 
     #[test]

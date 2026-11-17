@@ -6,14 +6,15 @@
 //! the regular Reader with that book. On Esc/q/Ctrl+C, the app quits
 //! with no selection.
 
-use crate::cover_cache::CoverCache;
+use crate::cover_cache::{CoverCache, CoverResult};
 use crate::epub::BookId;
 use crate::input::Action;
-use crate::library::LibraryEntry;
+use crate::library::{LibraryEntry, LibraryScanner};
 use crate::prefs::{PrefsStore, ViewMode};
 use crate::search::{filter_indices, SearchMode, SearchState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// Time to hold at the start of a long title before scrolling begins,
@@ -58,9 +59,11 @@ pub fn marquee_offset(elapsed_ms: u128, overflow: usize) -> usize {
 
 pub struct LibraryApp {
     entries: Vec<LibraryEntry>,
-    /// Parallel to `entries`: `book_ids[i]` is the BookId for `entries[i]`,
-    /// computed lazily on first call to `request_visible_covers(i)`.
-    /// Length always equals `entries.len()`.
+    /// Parallel to `entries`: `book_ids[i]` is the BookId for `entries[i]`.
+    /// Computed off-thread by the cover worker (which reads the file and
+    /// content-hashes it) and recorded here once the result drains back
+    /// through `record_cover_results`. `None` means the id isn't known
+    /// yet — or, if the file is unreadable, will never be known.
     book_ids: Vec<Option<BookId>>,
     /// Parallel to `entries`: pre-lowercased `"{title}\n{author}"` string
     /// for fast substring matching during search. Built once at
@@ -92,25 +95,63 @@ pub struct LibraryApp {
     /// cleared by the same action or by `Action::Quit` (so Esc dismisses
     /// the overlay rather than quitting the library).
     show_help: bool,
+    /// Incremental directory scanner, `Some` when the app owns a scan
+    /// root. `None` for apps built from pre-built entries (tests,
+    /// internal tooling) — in that case the scan can't be deepened and
+    /// `expand_scan_depth` is a no-op. The scanner remembers the
+    /// directories it has *not* descended into yet, so each expand
+    /// walks only new folders and never re-reads metadata for books it
+    /// has already seen.
+    scanner: Option<LibraryScanner>,
+    /// True while a deeper directory scan is blocking the event loop.
+    /// The renderer swaps the depth label for a "..." ellipsis while
+    /// this is set. Managed by the library event loop around
+    /// `expand_scan_depth`.
+    scanning: bool,
+    /// Paths whose cover job is in flight or whose BookId failed to
+    /// resolve. `request_visible_covers` skips these so a visible cell
+    /// isn't re-enqueued every frame; the entry is removed (by path)
+    /// when its result arrives with a BookId.
+    pending: HashSet<PathBuf>,
 }
 
 impl LibraryApp {
     /// Production constructor: opens PrefsStore and CoverCache from the
     /// OS data dir. Falls back to disabled cache (grid view degrades to
     /// list) if the OS data dir is unavailable. Prefs failure falls back
-    /// to default (ViewMode::Grid).
-    pub fn new(entries: Vec<LibraryEntry>, viewport: (u16, u16)) -> Self {
-        Self::new_with(entries, viewport, PrefsStore::open().ok(), CoverCache::open())
+    /// to default (ViewMode::Grid). `scanner` is the incremental scan
+    /// over the library root; its frontier and depth feed the
+    /// `ExpandScanDepth` action (see `expand_scan_depth`).
+    pub fn new(scanner: LibraryScanner, viewport: (u16, u16)) -> Self {
+        let entries = scanner.entries().to_vec();
+        Self::with_entries(
+            entries,
+            viewport,
+            PrefsStore::open().ok(),
+            CoverCache::open(),
+            Some(scanner),
+        )
     }
 
     /// Test/internal constructor: caller injects prefs and cache (or
-    /// `None`s for a minimal smoke harness).
+    /// `None`s for a minimal smoke harness). No scan root, so
+    /// `expand_scan_depth` is a no-op.
     #[doc(hidden)]
     pub fn new_with(
         entries: Vec<LibraryEntry>,
         viewport: (u16, u16),
         prefs: Option<PrefsStore>,
         cover_cache: Option<CoverCache>,
+    ) -> Self {
+        Self::with_entries(entries, viewport, prefs, cover_cache, None)
+    }
+
+    fn with_entries(
+        entries: Vec<LibraryEntry>,
+        viewport: (u16, u16),
+        prefs: Option<PrefsStore>,
+        cover_cache: Option<CoverCache>,
+        scanner: Option<LibraryScanner>,
     ) -> Self {
         let view_mode = prefs
             .as_ref()
@@ -139,6 +180,9 @@ impl LibraryApp {
             pre_search_selection: 0,
             marquee_start: Some(Instant::now()),
             show_help: false,
+            scanner,
+            scanning: false,
+            pending: HashSet::new(),
         }
     }
 
@@ -212,33 +256,138 @@ impl LibraryApp {
         self.show_help
     }
 
-    /// Request covers for the given entry indices. Resolves each index
-    /// to a `BookId` (lazily — computed once and stored in
-    /// `self.book_ids[idx]`), then calls `enqueue`. Indices out of range
-    /// are silently skipped.
-    ///
-    /// Each uncached index performs a synchronous file read on the
-    /// calling thread (needed because `BookId` is content-hashed from
-    /// the EPUB bytes). Callers must restrict `indices` to the visible
-    /// window — typically the cells currently on screen — to avoid
-    /// perceptible stalls when scrolling through large libraries.
-    pub fn request_visible_covers(&mut self, indices: impl IntoIterator<Item = usize>) {
-        let Some(cache) = self.cover_cache.as_mut() else {
+    /// Root directory this library was scanned from, if any. `None` for
+    /// app instances built with pre-built entries.
+    pub fn scan_root(&self) -> Option<&Path> {
+        self.scanner.as_ref().map(|s| s.root())
+    }
+
+    /// Current scan depth (0 = root only, `usize::MAX` = fully
+    /// recursive). `None` when the app has no scan root, meaning depth
+    /// can't be expanded.
+    pub fn scan_depth(&self) -> Option<usize> {
+        self.scanner.as_ref().map(|s| s.depth())
+    }
+
+    /// Set whether a deeper scan is currently blocking the event loop.
+    /// The library event loop flips this on just before the blocking
+    /// `expand_scan_depth` call (and off right after) so the renderer
+    /// can show a loading ellipsis in the depth slot.
+    pub fn set_scanning(&mut self, scanning: bool) {
+        self.scanning = scanning;
+    }
+
+    pub fn scanning(&self) -> bool {
+        self.scanning
+    }
+
+    /// Rescan one level deeper and swap in the results. Only the
+    /// directories the scanner hasn't explored yet are walked, so
+    /// already-known books are never re-opened. Preserves the
+    /// currently-selected book (matched by path) so the cursor doesn't
+    /// jump after expanding. No-op when there is no scan root or the
+    /// scan is already fully recursive.
+    pub fn expand_scan_depth(&mut self) {
+        let Some(scanner) = self.scanner.as_mut() else {
             return;
         };
+        if scanner.depth() == usize::MAX {
+            return;
+        }
+        let selected_path = self.entries.get(self.selection).map(|e| e.path.clone());
+        let expanded: std::io::Result<Vec<LibraryEntry>> =
+            scanner.expand().map(|()| scanner.entries().to_vec());
+        match expanded {
+            Ok(entries) => {
+                self.replace_entries(entries);
+                if let Some(path) = selected_path {
+                    if let Some(idx) = self.entries.iter().position(|e| e.path == path) {
+                        self.selection = idx;
+                        self.marquee_start = Some(Instant::now());
+                    }
+                }
+            }
+            Err(err) => self.save_error = Some(format!("expand failed: {err}")),
+        }
+    }
+
+    /// Replace the entry list and every structure parallel to it, then
+    /// clamp the selection to the new bounds. BookIds already computed
+    /// for unchanged entries (matched by path) are carried over, so an
+    /// expand doesn't re-hash or re-request covers for books that were
+    /// already in the list.
+    fn replace_entries(&mut self, entries: Vec<LibraryEntry>) {
+        let mut book_ids_by_path: HashMap<PathBuf, BookId> = self
+            .book_ids
+            .iter()
+            .zip(&self.entries)
+            .filter_map(|(id, e)| id.as_ref().map(|id| (e.path.clone(), id.clone())))
+            .collect();
+        self.entries = entries;
+        self.book_ids = self
+            .entries
+            .iter()
+            .map(|e| book_ids_by_path.remove(&e.path))
+            .collect();
+        self.entries_lowercased = self
+            .entries
+            .iter()
+            .map(|e| format!("{}\n{}", e.title.to_lowercase(), e.author.to_lowercase()))
+            .collect();
+        self.all_indices = (0..self.entries.len()).collect();
+        self.selection = self.selection.min(self.entries.len().saturating_sub(1));
+        self.pre_search_selection = self
+            .pre_search_selection
+            .min(self.entries.len().saturating_sub(1));
+        if matches!(self.search.mode, SearchMode::Editing | SearchMode::Applied) {
+            self.refilter();
+            self.selection = self
+                .selection
+                .min(self.search.filtered.len().saturating_sub(1));
+        }
+    }
+
+    /// Request covers for the given entry indices. Each index whose
+    /// BookId isn't known yet is enqueued with the cover worker, which
+    /// reads the file, computes the content-hash `BookId`, and (once the
+    /// result is drained back via [`LibraryApp::record_cover_results`])
+    /// the id is stored in `self.book_ids[idx]`. Enqueueing is
+    /// path-deduplicated through `self.pending` so a visible cell isn't
+    /// re-enqueued every frame. Indices out of range are silently
+    /// skipped. Never touches book bytes on the calling thread.
+    pub fn request_visible_covers(&mut self, indices: impl IntoIterator<Item = usize>) {
+        let mut to_enqueue: Vec<PathBuf> = Vec::new();
         for idx in indices {
             let Some(entry) = self.entries.get(idx) else {
                 continue;
             };
-            // Lazy-compute the BookId from the file bytes the first
-            // time we need it. Failure (e.g. file moved) just skips.
-            if self.book_ids[idx].is_none() {
-                if let Ok(bytes) = std::fs::read(&entry.path) {
-                    self.book_ids[idx] = Some(BookId::from_bytes(&bytes));
-                }
+            if self.book_ids[idx].is_some() {
+                continue;
             }
-            if let Some(id) = &self.book_ids[idx] {
-                cache.enqueue(id.clone(), entry.path.clone());
+            if self.pending.insert(entry.path.clone()) {
+                to_enqueue.push(entry.path.clone());
+            }
+        }
+        if let Some(cache) = self.cover_cache.as_mut() {
+            for path in to_enqueue {
+                cache.enqueue(path);
+            }
+        }
+    }
+
+    /// Apply finished cover jobs to the entry list. For each result with
+    /// a resolved BookId, matches the result back to its entry by path
+    /// and stores the id. Entries whose file couldn't be read stay
+    /// unresolved (their path is left in `pending` so they aren't
+    /// re-requested). The main event loop calls this right after
+    /// `drain_finished()` each frame.
+    pub fn record_cover_results(&mut self, results: Vec<CoverResult>) {
+        for result in results {
+            if result.book_id.is_some() {
+                self.pending.remove(&result.path);
+                if let Some(idx) = self.entries.iter().position(|e| e.path == result.path) {
+                    self.book_ids[idx] = result.book_id;
+                }
             }
         }
     }
@@ -478,6 +627,10 @@ impl LibraryApp {
             Action::OpenSearch => {
                 self.show_help = false;
                 self.open_search();
+            }
+            Action::ExpandScanDepth => {
+                self.show_help = false;
+                self.expand_scan_depth();
             }
             Action::ToggleHelp => {
                 self.show_help = !self.show_help;
@@ -1200,6 +1353,155 @@ mod tests {
         assert!(
             elapsed_post_nav < elapsed_pre_nav,
             "selection change should reset marquee_start; got pre={elapsed_pre_nav} post={elapsed_post_nav}"
+        );
+    }
+
+    fn app_with_root(root: &Path) -> LibraryApp {
+        let scanner = crate::library::LibraryScanner::new(root).unwrap();
+        let entries = scanner.entries().to_vec();
+        LibraryApp::with_entries(entries, (80, 24), None, None, Some(scanner))
+    }
+
+    /// Drain the cover worker and apply results until `idx` resolves a
+    /// BookId. Fails the test after 500ms so a stuck worker doesn't hang.
+    fn wait_for_book_id(app: &mut LibraryApp, idx: usize) {
+        for _ in 0..50 {
+            let results = app
+                .cover_cache_mut()
+                .map(|c| c.drain_finished())
+                .unwrap_or_default();
+            if !results.is_empty() {
+                app.record_cover_results(results);
+            }
+            if app.book_id(idx).is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("book_id {idx} did not resolve within 500ms");
+    }
+
+    #[test]
+    fn expand_scan_depth_adds_subfolder_books() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("top.epub"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/nested.epub"), "x").unwrap();
+        let mut app = app_with_root(dir.path());
+        assert_eq!(app.entries().len(), 1);
+        assert_eq!(app.scan_depth(), Some(0));
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(app.scan_depth(), Some(1));
+        let stems: Vec<String> = app
+            .entries()
+            .iter()
+            .map(|e| e.path.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(stems, vec!["nested", "top"]);
+    }
+
+    #[test]
+    fn expand_scan_depth_preserves_selection_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("top.epub"), "x").unwrap();
+        std::fs::write(dir.path().join("zebra.epub"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/aardvark.epub"), "x").unwrap();
+        let mut app = app_with_root(dir.path());
+        app.handle(Action::LineDown); // selection → 1 (zebra)
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(app.selection(), 2, "selection should follow the same book");
+        assert!(
+            app.entries()[app.selection()].path.ends_with("zebra.epub"),
+            "the preserved selection should be the previously-selected book"
+        );
+    }
+
+    #[test]
+    fn expand_scan_depth_on_empty_root_stays_empty_and_clamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_root(dir.path());
+        assert_eq!(app.entries().len(), 0);
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(app.entries().len(), 0);
+        assert_eq!(app.selection(), 0);
+        assert_eq!(app.scan_depth(), Some(1));
+    }
+
+    #[test]
+    fn expand_scan_depth_is_noop_without_root() {
+        let mut app = LibraryApp::new_with(vec![entry("A")], (80, 24), None, None);
+        assert_eq!(app.scan_depth(), None);
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(app.entries().len(), 1);
+        assert_eq!(app.scan_depth(), None);
+    }
+
+    #[test]
+    fn expand_scan_depth_is_noop_when_fully_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("top.epub"), "x").unwrap();
+        let scanner = crate::library::LibraryScanner::at_depth(dir.path(), usize::MAX).unwrap();
+        let entries = scanner.entries().to_vec();
+        let mut app = LibraryApp::with_entries(entries, (80, 24), None, None, Some(scanner));
+        assert_eq!(app.scan_depth(), Some(usize::MAX));
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(app.scan_depth(), Some(usize::MAX));
+        assert_eq!(app.entries().len(), 1);
+    }
+
+    #[test]
+    fn expand_scan_depth_refilters_active_search() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("top.epub"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/wanted.epub"), "x").unwrap();
+        let mut app = app_with_root(dir.path());
+        app.handle(Action::OpenSearch);
+        for ch in "wanted".chars() {
+            app.handle_search_input(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.handle_search_input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // Applied
+        assert_eq!(app.display_indices().len(), 0, "no match at depth 0");
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(
+            app.display_indices().len(),
+            1,
+            "active filter should re-run against the expanded entries"
+        );
+    }
+
+    #[test]
+    fn expand_preserves_computed_book_ids_by_path() {
+        // A resolved BookId must survive an expand so covers for known
+        // books aren't re-hashed / re-requested. New entries come in
+        // with no id until their cover job returns.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("top.epub"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/nested.epub"), "x").unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache = crate::cover_cache::CoverCache::open_at(cache_dir.path().to_path_buf());
+        let scanner = crate::library::LibraryScanner::new(dir.path()).unwrap();
+        let entries = scanner.entries().to_vec();
+        let mut app = LibraryApp::with_entries(entries, (80, 24), None, Some(cache), Some(scanner));
+
+        app.request_visible_covers(0..1);
+        wait_for_book_id(&mut app, 0);
+        let before = app.book_id(0).cloned();
+        assert!(before.is_some(), "root entry should resolve a book_id");
+
+        app.handle(Action::ExpandScanDepth);
+        assert_eq!(app.entries().len(), 2, "expand added the nested book");
+        // entries are re-sorted by title: ["nested", "top"].
+        assert_eq!(
+            app.book_id(1).cloned(),
+            before,
+            "the previously-seen book keeps its cached book_id"
+        );
+        assert!(
+            app.book_id(0).is_none(),
+            "the newly added book has no cached book_id yet"
         );
     }
 }

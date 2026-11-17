@@ -41,8 +41,52 @@ pub struct LibraryRenderInput<'a> {
     /// LibraryApp::marquee_elapsed_ms and the selected cell's title
     /// overflow.
     pub marquee_offset: usize,
+    /// What to show in the title bar's depth slot. `None` when the app
+    /// has no scan root, in which case no depth is shown. Drives the
+    /// "depth" label and the `e` expand hint.
+    pub scan_depth: Option<ScanDepthLabel>,
     /// True when the help overlay should be drawn on top of everything.
     pub show_help: bool,
+}
+
+/// Value rendered in the title bar's depth slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanDepthLabel {
+    /// Scanned to depth `n` (0 = root directory only).
+    At(usize),
+    /// `usize::MAX` — every subdirectory has been scanned.
+    Recursive,
+    /// A deeper scan is in progress; books are still being loaded.
+    Scanning,
+}
+
+impl ScanDepthLabel {
+    /// Map the app's scan-depth getter onto a display label. While
+    /// `scanning` is set the label is the loading ellipsis regardless
+    /// of the numeric depth.
+    pub fn from_depth(depth: Option<usize>, scanning: bool) -> Option<ScanDepthLabel> {
+        if scanning {
+            return Some(ScanDepthLabel::Scanning);
+        }
+        depth.map(|d| {
+            if d == usize::MAX {
+                ScanDepthLabel::Recursive
+            } else {
+                ScanDepthLabel::At(d)
+            }
+        })
+    }
+}
+
+/// Title-bar suffix describing the current scan depth. Empty when the
+/// library has no scan root (depth isn't tracked or expandable).
+fn depth_label(depth: Option<ScanDepthLabel>) -> String {
+    match depth {
+        None => String::new(),
+        Some(ScanDepthLabel::Scanning) => " · ... ".to_string(),
+        Some(ScanDepthLabel::Recursive) => " · recursive ".to_string(),
+        Some(ScanDepthLabel::At(n)) => format!(" · depth {n} "),
+    }
 }
 
 pub fn render_library(frame: &mut Frame, area: Rect, input: LibraryRenderInput<'_>) {
@@ -109,7 +153,11 @@ fn render_library_list(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
     // (which the footer surfaces as "N matches"). This deliberate split
     // gives the user both numbers at a glance.
     let title = TuiSpan::styled(
-        format!(" cleader library — {} book(s) ", input.entries.len()),
+        format!(
+            " cleader library — {} book(s){}",
+            input.entries.len(),
+            depth_label(input.scan_depth)
+        ),
         Style::default().add_modifier(Modifier::BOLD),
     );
     frame.render_widget(Paragraph::new(Line::from(title)), chunks[0]);
@@ -119,6 +167,9 @@ fn render_library_list(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
         && !matches!(input.search_mode, crate::search::SearchMode::Idle)
     {
         render_no_matches(frame, chunks[1]);
+    } else if input.entries.is_empty() {
+        // Empty library (no filter): hint at the expand action.
+        render_empty_library(frame, chunks[1]);
     } else {
         // List body. `display_indices` is the sequence to render.
         let visible_rows = chunks[1].height as usize;
@@ -157,7 +208,7 @@ fn render_library_list(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
             query: input.search_query,
             matches: input.display_indices.len(),
             warning: input.warning,
-            default_hint: " Enter open · ↑↓ navigate · / search · g grid · ? help · q quit ",
+            default_hint: " Enter open · ↑↓ navigate · / search · g grid · e expand · ? help · q quit ",
         },
     );
 }
@@ -179,7 +230,11 @@ fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
     // (which the footer surfaces as "N matches"). This deliberate split
     // gives the user both numbers at a glance.
     let title = TuiSpan::styled(
-        format!(" cleader library — {} book(s) ", input.entries.len()),
+        format!(
+            " cleader library — {} book(s){}",
+            input.entries.len(),
+            depth_label(input.scan_depth)
+        ),
         Style::default().add_modifier(Modifier::BOLD),
     );
     frame.render_widget(Paragraph::new(Line::from(title)), outer[0]);
@@ -190,6 +245,9 @@ fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
         && !matches!(input.search_mode, crate::search::SearchMode::Idle)
     {
         render_no_matches(frame, grid_area);
+    } else if input.entries.is_empty() {
+        // Empty library (no filter): hint at the expand action.
+        render_empty_library(frame, grid_area);
     } else {
         // Grid math, using display_indices length as total.
         let total = input.display_indices.len();
@@ -310,7 +368,7 @@ fn render_library_grid(frame: &mut Frame, area: Rect, input: LibraryRenderInput<
             query: input.search_query,
             matches: input.display_indices.len(),
             warning: input.warning,
-            default_hint: " Enter open · ↑↓ navigate · / search · g list · ? help · q quit ",
+            default_hint: " Enter open · ↑↓ navigate · / search · g list · e expand · ? help · q quit ",
         },
     );
 }
@@ -389,7 +447,28 @@ fn render_no_matches(frame: &mut Frame, area: Rect) {
     frame.render_widget(para, centered);
 }
 
-/// Truncate a string to fit within `max_cols` display columns. Uses
+/// Render a centered hint when the library is empty (no filter active):
+/// the folder had no EPUBs at the current scan depth, so point the user
+/// at the `e` expand action.
+fn render_empty_library(frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let msg = "no EPUBs here — press e to search subfolders";
+    let line = Line::from(TuiSpan::styled(
+        msg,
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    let para = Paragraph::new(line).alignment(Alignment::Center);
+    let center_y = area.y + area.height / 2;
+    let centered = Rect {
+        x: area.x,
+        y: center_y,
+        width: area.width,
+        height: 1,
+    };
+    frame.render_widget(para, centered);
+}
 /// unicode-width; appends "…" if anything was cut.
 pub(crate) fn truncate_to_width(s: &str, max_cols: usize) -> String {
     use unicode_width::UnicodeWidthChar;
@@ -440,6 +519,36 @@ mod tests {
     }
 
     #[test]
+    fn scan_depth_label_maps_depths_and_scanning() {
+        assert_eq!(ScanDepthLabel::from_depth(None, false), None);
+        assert_eq!(
+            ScanDepthLabel::from_depth(Some(0), false),
+            Some(ScanDepthLabel::At(0))
+        );
+        assert_eq!(
+            ScanDepthLabel::from_depth(Some(usize::MAX), false),
+            Some(ScanDepthLabel::Recursive)
+        );
+        // Scanning overrides whatever the numeric depth is.
+        assert_eq!(
+            ScanDepthLabel::from_depth(Some(3), true),
+            Some(ScanDepthLabel::Scanning)
+        );
+        assert_eq!(
+            ScanDepthLabel::from_depth(None, true),
+            Some(ScanDepthLabel::Scanning)
+        );
+    }
+
+    #[test]
+    fn depth_label_renders_ellipsis_while_scanning() {
+        assert_eq!(depth_label(None), "");
+        assert_eq!(depth_label(Some(ScanDepthLabel::At(2))), " · depth 2 ");
+        assert_eq!(depth_label(Some(ScanDepthLabel::Recursive)), " · recursive ");
+        assert_eq!(depth_label(Some(ScanDepthLabel::Scanning)), " · ... ");
+    }
+
+    #[test]
     fn library_render_does_not_panic_on_narrow_terminal() {
         let backend = TestBackend::new(10, 4);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -462,6 +571,7 @@ mod tests {
                 search_query: None,
                 search_mode: crate::search::SearchMode::Idle,
                 marquee_offset: 0,
+                scan_depth: None,
                 show_help: false,
             });
         }).unwrap();
@@ -491,6 +601,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -521,6 +632,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -536,12 +648,22 @@ mod tests {
         let mut cache = CoverCache::open_at(dir.path().to_path_buf());
         let id = BookId::from_bytes(b"book-a");
         // Write a deliberately-recognizable cover row to disk so the
-        // cache picks it up via enqueue (synchronous disk-hit path).
+        // worker's disk-cache hit path serves it without decoding.
         let lines: Vec<String> = (0..17)
             .map(|i| format!("ROW{i:02}{}", " ".repeat(17)))
             .collect();
         crate::cover_cache::write_cached(dir.path(), &id, &lines).unwrap();
-        cache.enqueue(id.clone(), PathBuf::from("/tmp/book-a.epub"));
+        let book = dir.path().join("book-a.epub");
+        std::fs::write(&book, b"book-a").unwrap();
+        cache.enqueue(book);
+        // Wait for the worker to hash the file, hit the disk cache, and
+        // deliver the cover into memory.
+        for _ in 0..50 {
+            if !cache.drain_finished().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         let entries = vec![lib_entry("Book A")];
         let book_ids = vec![Some(id.clone())];
@@ -564,6 +686,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -608,6 +731,7 @@ mod tests {
                         search_query: None,
                         search_mode: crate::search::SearchMode::Idle,
                         marquee_offset: 0,
+                        scan_depth: None,
                         show_help: false,
                     },
                 );
@@ -654,6 +778,7 @@ mod tests {
                     search_query: Some("book"),
                     search_mode: crate::search::SearchMode::Editing,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -690,6 +815,7 @@ mod tests {
                     search_query: Some("book"),
                     search_mode: crate::search::SearchMode::Applied,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -726,6 +852,7 @@ mod tests {
                     search_query: Some("xyz"),
                     search_mode: crate::search::SearchMode::Editing,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -792,6 +919,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -819,6 +947,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 7,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -866,6 +995,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 7,
+                    scan_depth: None,
                     show_help: false,
                 },
             );
@@ -904,6 +1034,7 @@ mod tests {
                     search_query: None,
                     search_mode: crate::search::SearchMode::Idle,
                     marquee_offset: 0,
+                    scan_depth: None,
                     show_help: true,
                 },
             );

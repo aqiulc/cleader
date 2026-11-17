@@ -203,12 +203,16 @@ fn library_grid_renders_without_panic_when_directory_has_epubs() {
 
     let mut app = LibraryApp::new_with(entries, (80, 40), Some(prefs), Some(cover_cache));
     app.request_visible_covers(0..1);
-    // Give the worker a moment so the cover may land in the cache.
+    // Give the worker a moment so the cover may land in the cache and
+    // its BookId is recorded on the entry.
     for _ in 0..30 {
-        if let Some(cache) = app.cover_cache_mut() {
-            if cache.drain_finished() {
-                break;
-            }
+        let results = app
+            .cover_cache_mut()
+            .map(|c| c.drain_finished())
+            .unwrap_or_default();
+        if !results.is_empty() {
+            app.record_cover_results(results);
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -236,6 +240,7 @@ fn library_grid_renders_without_panic_when_directory_has_epubs() {
                 search_query: None,
                 search_mode: cleader::search::SearchMode::Idle,
                 marquee_offset: 0,
+                scan_depth: None,
                 show_help: false,
             },
         );

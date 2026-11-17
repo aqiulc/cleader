@@ -27,6 +27,7 @@ const HELP_LINES: &[(&str, &str)] = &[
     ("  Navigate", "↑ ↓ ← → / h j k l"),
     ("  Toggle grid/list", "g"),
     ("  Search", "/"),
+    ("  Expand scan into subfolders", "e"),
     ("  Open selected book", "Enter"),
     ("", ""),
     ("Reading", ""),
