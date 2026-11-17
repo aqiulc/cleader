@@ -34,6 +34,8 @@ const HELP_LINES: &[(&str, &str)] = &[
     ("  Flip page", "← → / h l / Space b / PgUp PgDn"),
     ("  Next chapter", "n"),
     ("  Previous chapter", "N (Shift+n)"),
+    ("  Undo last move", "u"),
+    ("  Redo move", "r"),
     ("  Table of contents", "t"),
     ("", ""),
     ("Anywhere", ""),
